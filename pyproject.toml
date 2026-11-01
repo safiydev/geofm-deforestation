@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "geofm-deforestation"
+version = "1.0.0"
+description = "Geospatial AI for Early Deforestation Detection and EUDR Regulatory Compliance"
+authors = [
+    { name = "Antigravity Remote Sensing Engineering Team" }
+]
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "torch",
+    "numpy",
+    "pystac",
+    "fastapi",
+    "uvicorn",
+    "pydantic",
+    "requests",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["geofm*"]
