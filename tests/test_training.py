@@ -110,3 +110,83 @@ def test_trainer_single_epoch_run(tmp_path):
     assert len(history) == 1
     assert "val_iou" in history[0]
     assert (tmp_path / "best_model.pt").exists()
+
+
+def test_dataset_preflight_validation_and_sanitization():
+    from geofm.training.dataset import (
+        GeoSample,
+        GeospatialDeforestationDataset,
+        validate_sample,
+    )
+
+    # 1. Valid sample
+    valid_sample = GeoSample(
+        sample_id="valid_01",
+        t1_optical=np.ones((4, 16, 16), dtype=np.float32),
+        t2_optical=np.ones((4, 16, 16), dtype=np.float32),
+        target_mask=np.zeros((1, 16, 16), dtype=np.float32),
+    )
+    is_valid, msg = validate_sample(valid_sample)
+    assert is_valid is True
+    assert msg == "Valid"
+
+    # 2. Corrupted sample with NaNs
+    nan_sample = GeoSample(
+        sample_id="corrupt_nan",
+        t1_optical=np.full((4, 16, 16), np.nan, dtype=np.float32),
+        t2_optical=np.ones((4, 16, 16), dtype=np.float32),
+        target_mask=np.zeros((1, 16, 16), dtype=np.float32),
+    )
+    is_valid, msg = validate_sample(nan_sample)
+    assert is_valid is False
+    assert "NaN" in msg
+
+    # 3. Shape mismatch sample
+    mismatch_sample = GeoSample(
+        sample_id="mismatch",
+        t1_optical=np.ones((4, 16, 16), dtype=np.float32),
+        t2_optical=np.ones((4, 32, 32), dtype=np.float32),
+        target_mask=np.zeros((1, 16, 16), dtype=np.float32),
+    )
+    is_valid, msg = validate_sample(mismatch_sample)
+    assert is_valid is False
+    assert "Shape mismatch" in msg
+
+    # 4. Dataset with pre-flight sanitization automatically drops corrupt items
+    mixed_samples = [valid_sample, nan_sample, mismatch_sample]
+    ds = GeospatialDeforestationDataset(mixed_samples, preflight_validate=True)
+    assert len(ds) == 1
+    assert ds.invalid_samples_count == 2
+    assert ds[0]["sample_id"] == "valid_01"
+
+
+def test_dataset_npz_caching_and_loading(tmp_path):
+    from geofm.training.dataset import (
+        GeoSample,
+        cache_dataset_to_npz,
+        load_dataset_from_npz,
+    )
+
+    samples = [
+        GeoSample(
+            sample_id=f"chip_{i}",
+            t1_optical=np.full((4, 16, 16), fill_value=0.2 * i, dtype=np.float32),
+            t2_optical=np.full((4, 16, 16), fill_value=0.3 * i, dtype=np.float32),
+            target_mask=np.zeros((1, 16, 16), dtype=np.float32),
+            lon=-60.0 + i * 0.1,
+            lat=-3.0 + i * 0.1,
+            block_id=i,
+        )
+        for i in range(3)
+    ]
+
+    cache_dir = str(tmp_path / "npz_cache")
+    saved_files = cache_dataset_to_npz(samples, cache_dir)
+    assert len(saved_files) == 3
+
+    loaded = load_dataset_from_npz(cache_dir)
+    assert len(loaded) == 3
+    assert loaded[0].sample_id == "chip_0"
+    assert loaded[1].sample_id == "chip_1"
+    assert loaded[0].t1_optical.shape == (4, 16, 16)
+    assert np.isclose(loaded[1].lon, -59.9)

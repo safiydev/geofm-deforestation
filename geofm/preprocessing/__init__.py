@@ -4,6 +4,7 @@ from geofm.preprocessing.optical import OpticalPreprocessor
 from geofm.preprocessing.sar import SARPreprocessor
 from geofm.preprocessing.cog_reader import COGWindowReader, Window, GeoTransform
 from geofm.preprocessing.stac import STACManager
+from geofm.preprocessing.catalog_validator import CatalogValidator
 
 __all__ = [
     "OpticalPreprocessor",
@@ -12,4 +13,5 @@ __all__ = [
     "Window",
     "GeoTransform",
     "STACManager",
+    "CatalogValidator",
 ]

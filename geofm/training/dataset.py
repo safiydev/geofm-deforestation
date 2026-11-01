@@ -3,13 +3,19 @@
 Prevents spatial autocorrelation and data leakage between training, validation,
 and test sets by partitioning tiles into geographically isolated spatial blocks
 with spatial buffer margins (TorchGeo-style spatial partitioning).
+Includes resilient pre-flight verification and offline NPZ chip caching.
 """
 
-from dataclasses import dataclass
-from typing import Dict, List, Optional, Set, Tuple, Union
+from dataclasses import asdict, dataclass
+import logging
+import os
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 import numpy as np
 import torch
 from torch.utils.data import Dataset, Subset
+
+logger = logging.getLogger("geofm.training.dataset")
 
 
 @dataclass
@@ -26,12 +32,70 @@ class GeoSample:
     block_id: int = 0
 
 
-class GeospatialDeforestationDataset(Dataset):
-    """PyTorch Dataset for bitemporal and multimodal deforestation chips."""
+def validate_sample(sample: GeoSample) -> Tuple[bool, str]:
+    """Pre-flight validation for a geospatial sample to prevent training crashes."""
+    if not isinstance(sample, GeoSample):
+        return False, f"Expected GeoSample instance, got {type(sample)}"
 
-    def __init__(self, samples: List[GeoSample], transform: Optional[any] = None):
-        self.samples = samples
+    # 1. Check array presence
+    if sample.t1_optical is None or sample.t2_optical is None or sample.target_mask is None:
+        return False, "Missing required array (t1_optical, t2_optical, or target_mask)"
+
+    # 2. Check dimensions
+    if sample.t1_optical.ndim != 3 or sample.t2_optical.ndim != 3:
+        return False, f"Optical arrays must be 3D (C, H, W), got t1:{sample.t1_optical.shape}, t2:{sample.t2_optical.shape}"
+
+    if sample.t1_optical.shape != sample.t2_optical.shape:
+        return False, f"Shape mismatch between t1 {sample.t1_optical.shape} and t2 {sample.t2_optical.shape}"
+
+    # 3. Check spatial dimensions with target mask
+    _, h, w = sample.t1_optical.shape
+    if sample.target_mask.shape[-2:] != (h, w):
+        return False, f"Mask spatial shape {sample.target_mask.shape} does not match optical spatial shape ({h}, {w})"
+
+    # 4. Check for NaNs or Infs
+    if np.isnan(sample.t1_optical).any() or np.isnan(sample.t2_optical).any():
+        return False, "Optical arrays contain NaN values"
+
+    if np.isinf(sample.t1_optical).any() or np.isinf(sample.t2_optical).any():
+        return False, "Optical arrays contain Infinite values"
+
+    return True, "Valid"
+
+
+class GeospatialDeforestationDataset(Dataset):
+    """PyTorch Dataset for bitemporal and multimodal deforestation chips.
+
+    Includes automatic pre-flight data sanitization to filter out corrupt or
+    dimension-mismatched satellite tiles before training.
+    """
+
+    def __init__(
+        self,
+        samples: List[GeoSample],
+        transform: Optional[Any] = None,
+        preflight_validate: bool = True,
+    ):
         self.transform = transform
+        self.invalid_samples_count = 0
+
+        if preflight_validate:
+            valid_samples: List[GeoSample] = []
+            for s in samples:
+                is_valid, msg = validate_sample(s)
+                if is_valid:
+                    valid_samples.append(s)
+                else:
+                    self.invalid_samples_count += 1
+                    logger.warning(f"Skipping corrupt sample '{getattr(s, 'sample_id', 'unknown')}': {msg}")
+
+            if not valid_samples and samples:
+                logger.error("All samples failed pre-flight validation. Falling back to raw list.")
+                self.samples = samples
+            else:
+                self.samples = valid_samples
+        else:
+            self.samples = samples
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -39,23 +103,109 @@ class GeospatialDeforestationDataset(Dataset):
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         s = self.samples[idx]
 
+        # Ensure non-negative finite float32
+        t1_arr = np.nan_to_num(s.t1_optical, nan=0.0, posinf=1.0, neginf=0.0).astype(np.float32)
+        t2_arr = np.nan_to_num(s.t2_optical, nan=0.0, posinf=1.0, neginf=0.0).astype(np.float32)
+        tgt_arr = np.nan_to_num(s.target_mask, nan=0.0, posinf=1.0, neginf=0.0).astype(np.float32)
+
+        if tgt_arr.ndim == 2:
+            tgt_arr = tgt_arr[np.newaxis, ...]
+
         item = {
             "sample_id": s.sample_id,
-            "t1": torch.from_numpy(s.t1_optical).float(),
-            "t2": torch.from_numpy(s.t2_optical).float(),
-            "target": torch.from_numpy(s.target_mask).float(),
+            "t1": torch.from_numpy(t1_arr),
+            "t2": torch.from_numpy(t2_arr),
+            "target": torch.from_numpy(tgt_arr),
             "lon": torch.tensor(s.lon, dtype=torch.float32),
             "lat": torch.tensor(s.lat, dtype=torch.float32),
             "block_id": torch.tensor(s.block_id, dtype=torch.long),
         }
 
         if s.sar_data is not None:
-            item["sar"] = torch.from_numpy(s.sar_data).float()
+            sar_arr = np.nan_to_num(s.sar_data, nan=0.0, posinf=0.0, neginf=-30.0).astype(np.float32)
+            item["sar"] = torch.from_numpy(sar_arr)
 
         if s.cloud_mask is not None:
-            item["cloud_mask"] = torch.from_numpy(s.cloud_mask).float()
+            c_arr = np.nan_to_num(s.cloud_mask, nan=0.0).astype(np.float32)
+            if c_arr.ndim == 2:
+                c_arr = c_arr[np.newaxis, ...]
+            item["cloud_mask"] = torch.from_numpy(c_arr)
 
         return item
+
+
+# Backwards-compatibility alias
+DeforestationDataset = GeospatialDeforestationDataset
+
+
+def cache_dataset_to_npz(samples: List[GeoSample], output_dir: str) -> List[str]:
+    """Serialize and cache geospatial training chips to local .npz files for high-speed offline training.
+
+    Args:
+        samples: List of GeoSample objects.
+        output_dir: Directory where .npz chips will be saved.
+
+    Returns:
+        List of saved file paths.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    saved_paths: List[str] = []
+
+    for idx, s in enumerate(samples):
+        chip_id = s.sample_id or f"chip_{idx:05d}"
+        file_path = os.path.join(output_dir, f"{chip_id}.npz")
+
+        data_dict: Dict[str, Any] = {
+            "sample_id": s.sample_id,
+            "t1_optical": s.t1_optical,
+            "t2_optical": s.t2_optical,
+            "target_mask": s.target_mask,
+            "lon": s.lon,
+            "lat": s.lat,
+            "block_id": s.block_id,
+        }
+        if s.sar_data is not None:
+            data_dict["sar_data"] = s.sar_data
+        if s.cloud_mask is not None:
+            data_dict["cloud_mask"] = s.cloud_mask
+
+        np.savez_compressed(file_path, **data_dict)
+        saved_paths.append(file_path)
+
+    logger.info(f"Cached {len(saved_paths)} geospatial chips to {output_dir}")
+    return saved_paths
+
+
+def load_dataset_from_npz(cache_dir: str) -> List[GeoSample]:
+    """Load cached .npz geospatial chips from directory into GeoSample list.
+
+    Args:
+        cache_dir: Directory containing .npz files.
+
+    Returns:
+        List of GeoSample objects.
+    """
+    path = Path(cache_dir)
+    npz_files = sorted(list(path.glob("*.npz")))
+    samples: List[GeoSample] = []
+
+    for p in npz_files:
+        with np.load(p) as data:
+            s = GeoSample(
+                sample_id=str(data["sample_id"]),
+                t1_optical=data["t1_optical"],
+                t2_optical=data["t2_optical"],
+                target_mask=data["target_mask"],
+                sar_data=data["sar_data"] if "sar_data" in data else None,
+                cloud_mask=data["cloud_mask"] if "cloud_mask" in data else None,
+                lon=float(data["lon"]) if "lon" in data else 0.0,
+                lat=float(data["lat"]) if "lat" in data else 0.0,
+                block_id=int(data["block_id"]) if "block_id" in data else 0,
+            )
+            samples.append(s)
+
+    logger.info(f"Loaded {len(samples)} cached chips from {cache_dir}")
+    return samples
 
 
 class SpatialBlockSplitter:

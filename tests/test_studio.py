@@ -480,3 +480,38 @@ def test_studio_training_multimodal_and_unet(tmp_path):
     assert res_unet["use_lora"] is False
     assert abs(res_unet["history"][0]["lr"] - 0.0005) < 1e-6
 
+
+def test_web_studio_catalog_validate_endpoint():
+    # Valid scheme test
+    resp = client.post(
+        "/studio/api/catalog/validate",
+        json={"url": "https://sentinel-cogs.s3.us-west-2.amazonaws.com/test.tif"},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "url" in data
+    assert "exists" in data
+
+    # Invalid scheme test
+    resp_inv = client.post(
+        "/studio/api/catalog/validate",
+        json={"url": "ftp://bad-url"},
+    )
+    assert resp_inv.status_code == 200
+    assert resp_inv.json()["exists"] is False
+
+
+def test_web_studio_catalog_heal_endpoint():
+    # Auto-heal the user's specific malformed path
+    malformed_url = (
+        "https://sentinel-cogs.s3.amazonaws.com/sentinel-s2-l2a-cogs/"
+        "20/M/PA/2023/11/S2A_20231124/B02.tif"
+    )
+    resp = client.post("/studio/api/catalog/heal", json={"url": malformed_url})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["success"] is True
+    assert data["healed"] is True
+    assert data["mgrs_tile"] == "20MPA"
+    assert "B02.tif" in data["verified_band_url"]
+

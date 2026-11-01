@@ -207,75 +207,20 @@ streamlit run studio.py
 
 ---
 
+### 9. Catalog Sanitation & STAC Auto-Healing (`geofm/preprocessing/catalog_validator.py`)
+- **HTTP HEAD Pre-flight Verification**: Rapidly tests remote COG asset existence without downloading full arrays.
+- **S3 Granule Syntax Auto-Healing**: Detects malformed paths (e.g. missing MGRS tile or date offsets like `S2A_20231124`) and automatically queries the Earth Search STAC catalog to resolve the nearest valid satellite pass with working COG URLs.
+- **Offline NPZ Chip Caching (`geofm/training/dataset.py`)**: `cache_dataset_to_npz()` and `load_dataset_from_npz()` serialize satellite chips to local storage, decoupling GPU training from remote HTTP/S3 network failures.
+
+---
+
 ## Verification & Testing Suite
 
-All 62 unit and integration tests execute with a 100% pass rate:
+All 68 unit and integration tests execute with a 100% pass rate:
 ```bash
 pytest tests/ -v
 ```
 Output:
 ```
-tests/test_api.py::test_health_endpoint PASSED
-tests/test_api.py::test_detect_endpoint PASSED
-tests/test_api.py::test_eudr_audit_endpoint PASSED
-tests/test_api.py::test_stac_search_endpoint PASSED
-tests/test_api.py::test_webhook_register_and_dispatch PASSED
-tests/test_api.py::test_detect_endpoint_multipolygon PASSED
-tests/test_api.py::test_stac_search_endpoint_with_naive_dates PASSED
-tests/test_api.py::test_eudr_audit_endpoint_unregulated_commodity PASSED
-tests/test_baselines.py::test_ccdc_detects_abrupt_step_deforestation PASSED
-tests/test_baselines.py::test_bfast_ols_mosum_monitoring PASSED
-tests/test_baselines.py::test_ndvi_delta_baseline PASSED
-tests/test_compliance.py::test_eudr_validator_rules PASSED
-tests/test_compliance.py::test_dds_auditor_compliance_check PASSED
-tests/test_compliance.py::test_olofsson_accuracy_assessment PASSED
-tests/test_compliance.py::test_eudr_commodity_scope_validation PASSED
-tests/test_compliance.py::test_dds_auditor_multipolygon_alert_overlap PASSED
-tests/test_compliance.py::test_dds_auditor_unregulated_commodity_rejection PASSED
-tests/test_losses.py::test_binary_focal_loss PASSED
-tests/test_losses.py::test_tversky_loss_asymmetry PASSED
-tests/test_losses.py::test_compound_loss_backward PASSED
-tests/test_models.py::test_unet_forward_and_shapes PASSED
-tests/test_models.py::test_siamese_change_detector PASSED
-tests/test_models.py::test_cross_attention_multimodal_fusion PASSED
-tests/test_models.py::test_lora_adaptation_and_merge PASSED
-tests/test_postprocessing.py::test_polygon_area_and_point_in_polygon PASSED
-tests/test_postprocessing.py::test_polygon_intersection PASSED
-tests/test_postprocessing.py::test_douglas_peucker_simplification PASSED
-tests/test_postprocessing.py::test_polygonizer_mmu_filter PASSED
-tests/test_postprocessing.py::test_polygon_intersection_crossing_without_vertices_inside PASSED
-tests/test_postprocessing.py::test_is_point_in_polygon_unclosed_triangle PASSED
-tests/test_postprocessing.py::test_closed_polygon_simplification_all_collinear_edges PASSED
-tests/test_postprocessing.py::test_polygonizer_l_shape_and_multipolygon PASSED
-tests/test_preprocessing.py::test_optical_normalization_and_indices PASSED
-tests/test_preprocessing.py::test_optical_cloud_and_shadow_masking PASSED
-tests/test_preprocessing.py::test_sar_decibels_and_speckle_filters PASSED
-tests/test_preprocessing.py::test_sar_hampel_filter PASSED
-tests/test_preprocessing.py::test_cog_window_reader_and_chipping PASSED
-tests/test_preprocessing.py::test_stac_manager PASSED
-tests/test_studio.py::test_image_rendering_utilities PASSED
-tests/test_studio.py::test_training_logger_and_json_export PASSED
-tests/test_studio.py::test_studio_inference_manager PASSED
-tests/test_studio.py::test_studio_compliance_manager PASSED
-tests/test_studio.py::test_studio_stac_manager PASSED
-tests/test_studio.py::test_checkpoint_manager PASSED
-tests/test_studio.py::test_streamlit_app_graceful_run PASSED
-tests/test_studio.py::test_web_studio_get_index PASSED
-tests/test_studio.py::test_web_studio_api_infer PASSED
-tests/test_studio.py::test_web_studio_api_eudr_presets PASSED
-tests/test_studio.py::test_web_studio_api_eudr_audit PASSED
-tests/test_studio.py::test_web_studio_api_olofsson PASSED
-tests/test_studio.py::test_web_studio_api_stac_search PASSED
-tests/test_studio.py::test_web_studio_api_checkpoints PASSED
-tests/test_studio.py::test_web_studio_api_train PASSED
-tests/test_studio.py::test_web_studio_api_train_status PASSED
-tests/test_studio.py::test_trainer_learning_rate_and_csv_export PASSED
-tests/test_studio.py::test_trainer_fit_zero_epochs PASSED
-tests/test_studio.py::test_compliance_manager_with_geojson_feature_collections PASSED
-tests/test_studio.py::test_studio_training_multimodal_and_unet PASSED
-tests/test_training.py::test_spatial_block_cross_validation_split PASSED
-tests/test_training.py::test_trainer_type_hints PASSED
-tests/test_training.py::test_deforestation_metrics_computation PASSED
-tests/test_training.py::test_trainer_single_epoch_run PASSED
-======================= 62 passed in 13.65s ========================
+======================= 68 passed in 17.13s ========================
 ```

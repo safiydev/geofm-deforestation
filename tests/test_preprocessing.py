@@ -148,3 +148,68 @@ def test_stac_manager():
         end_date=datetime(2023, 12, 31),
     )
     assert len(matched_naive) == 2
+
+
+def test_catalog_validator_url_parsing_and_healing():
+    from geofm.preprocessing.catalog_validator import CatalogValidator
+
+    validator = CatalogValidator()
+
+    # The user's exact malformed URL from AWS S3
+    malformed_url = (
+        "https://sentinel-cogs.s3.amazonaws.com/sentinel-s2-l2a-cogs/"
+        "20/M/PA/2023/11/S2A_20231124/B02.tif"
+    )
+
+    meta = validator.parse_sentinel2_url(malformed_url)
+    assert meta is not None
+    assert meta["is_malformed"] is True
+    assert meta["utm_zone"] == "20"
+    assert meta["latitude_band"] == "M"
+    assert meta["grid_square"] == "PA"
+    assert meta["mgrs_tile"] == "20MPA"
+    assert meta["year"] == 2023
+    assert meta["month"] == 11
+    assert meta["band"] == "B02"
+
+    # Test auto-healing: resolves to valid orbital pass on tile 20MPA
+    healed = validator.auto_heal_sentinel2_url(malformed_url)
+    assert healed["success"] is True
+    assert healed["healed"] is True
+    assert healed["mgrs_tile"] == "20MPA"
+    assert "20MPA" in healed["matched_granule_id"]
+    assert "B02.tif" in healed["verified_band_url"]
+    assert "B02" in healed["bands"]
+    assert "B04" in healed["bands"]
+    assert "B08" in healed["bands"]
+
+
+def test_catalog_validator_cog_url_and_entry():
+    from geofm.preprocessing.catalog_validator import CatalogValidator
+
+    validator = CatalogValidator()
+
+    # Invalid URL scheme
+    exists, code, msg = validator.validate_cog_url("ftp://example.com/test.tif")
+    assert exists is False
+    assert code == 0
+
+    # Catalog entry with high cloud cover
+    entry_cloudy = {
+        "id": "item-cloudy",
+        "cloud_cover_pct": 45.0,
+        "bands": {"B02": "url2", "B03": "url3", "B04": "url4", "B08": "url8"},
+    }
+    res_cloudy = validator.validate_catalog_entry(entry_cloudy, max_cloud_cover=20.0)
+    assert res_cloudy["is_valid"] is False
+    assert "exceeds max threshold" in res_cloudy["issues"][0]
+
+    # Catalog entry missing required bands
+    entry_missing = {
+        "id": "item-missing",
+        "cloud_cover_pct": 5.0,
+        "bands": {"B02": "url2"},  # Missing B03, B04, B08
+    }
+    res_missing = validator.validate_catalog_entry(entry_missing)
+    assert res_missing["is_valid"] is False
+    assert "Missing required spectral bands" in res_missing["issues"][0]

@@ -25,6 +25,7 @@ from geofm.postprocessing.polygonizer import Polygonizer
 from geofm.preprocessing.optical import OpticalPreprocessor
 from geofm.preprocessing.sar import SARPreprocessor
 from geofm.preprocessing.stac import STACManager
+from geofm.preprocessing.catalog_validator import CatalogValidator
 from geofm.training.dataset import GeospatialDeforestationDataset, SpatialBlockSplitter
 from geofm.training.trainer import DeforestationTrainer
 from geofm.utils.synthetic_data import generate_synthetic_dataset, generate_synthetic_scene
@@ -582,6 +583,7 @@ class StudioSTACManager:
 
     def __init__(self):
         self.stac_manager = STACManager()
+        self.validator = CatalogValidator()
         self.cached_items = self._init_sample_items()
 
     def _init_sample_items(self) -> List[Any]:
@@ -591,22 +593,22 @@ class StudioSTACManager:
                 bbox=[-60.5, -3.5, -59.5, -2.5],
                 dt=datetime(2023, 10, 15, 14, 0, 51, tzinfo=timezone.utc),
                 asset_hrefs={
-                    "B02": "https://sentinel-cogs.s3.amazonaws.com/sentinel-s2-l2a-cogs/20/M/PA/2023/10/S2B_20231015/B02.tif",
-                    "B03": "https://sentinel-cogs.s3.amazonaws.com/sentinel-s2-l2a-cogs/20/M/PA/2023/10/S2B_20231015/B03.tif",
-                    "B04": "https://sentinel-cogs.s3.amazonaws.com/sentinel-s2-l2a-cogs/20/M/PA/2023/10/S2B_20231015/B04.tif",
-                    "B08": "https://sentinel-cogs.s3.amazonaws.com/sentinel-s2-l2a-cogs/20/M/PA/2023/10/S2B_20231015/B08.tif",
+                    "B02": "https://sentinel-cogs.s3.us-west-2.amazonaws.com/sentinel-s2-l2a-cogs/20/M/PA/2023/10/S2B_20MPA_20231015_0_L2A/B02.tif",
+                    "B03": "https://sentinel-cogs.s3.us-west-2.amazonaws.com/sentinel-s2-l2a-cogs/20/M/PA/2023/10/S2B_20MPA_20231015_0_L2A/B03.tif",
+                    "B04": "https://sentinel-cogs.s3.us-west-2.amazonaws.com/sentinel-s2-l2a-cogs/20/M/PA/2023/10/S2B_20MPA_20231015_0_L2A/B04.tif",
+                    "B08": "https://sentinel-cogs.s3.us-west-2.amazonaws.com/sentinel-s2-l2a-cogs/20/M/PA/2023/10/S2B_20MPA_20231015_0_L2A/B08.tif",
                 },
                 cloud_cover=3.8,
             ),
             self.stac_manager.create_sentinel2_item(
-                item_id="S2A_MSIL2A_20231124T140049_N0509_R067_T20MPA",
+                item_id="S2A_MSIL2A_20231121T140049_N0509_R067_T20MPA",
                 bbox=[-60.5, -3.5, -59.5, -2.5],
-                dt=datetime(2023, 11, 24, 14, 0, 49, tzinfo=timezone.utc),
+                dt=datetime(2023, 11, 21, 14, 0, 49, tzinfo=timezone.utc),
                 asset_hrefs={
-                    "B02": "https://sentinel-cogs.s3.amazonaws.com/sentinel-s2-l2a-cogs/20/M/PA/2023/11/S2A_20231124/B02.tif",
-                    "B03": "https://sentinel-cogs.s3.amazonaws.com/sentinel-s2-l2a-cogs/20/M/PA/2023/11/S2A_20231124/B03.tif",
-                    "B04": "https://sentinel-cogs.s3.amazonaws.com/sentinel-s2-l2a-cogs/20/M/PA/2023/11/S2A_20231124/B04.tif",
-                    "B08": "https://sentinel-cogs.s3.amazonaws.com/sentinel-s2-l2a-cogs/20/M/PA/2023/11/S2A_20231124/B08.tif",
+                    "B02": "https://sentinel-cogs.s3.us-west-2.amazonaws.com/sentinel-s2-l2a-cogs/20/M/PA/2023/11/S2A_20MPA_20231121_0_L2A/B02.tif",
+                    "B03": "https://sentinel-cogs.s3.us-west-2.amazonaws.com/sentinel-s2-l2a-cogs/20/M/PA/2023/11/S2A_20MPA_20231121_0_L2A/B03.tif",
+                    "B04": "https://sentinel-cogs.s3.us-west-2.amazonaws.com/sentinel-s2-l2a-cogs/20/M/PA/2023/11/S2A_20MPA_20231121_0_L2A/B04.tif",
+                    "B08": "https://sentinel-cogs.s3.us-west-2.amazonaws.com/sentinel-s2-l2a-cogs/20/M/PA/2023/11/S2A_20MPA_20231121_0_L2A/B08.tif",
                 },
                 cloud_cover=14.2,
             ),
@@ -629,6 +631,15 @@ class StudioSTACManager:
                 },
             ),
         ]
+
+    def validate_url(self, url: str) -> Dict[str, Any]:
+        """Validate COG URL via rapid HTTP HEAD request."""
+        exists, code, msg = self.validator.validate_cog_url(url)
+        return {"url": url, "exists": exists, "status_code": code, "message": msg}
+
+    def heal_url(self, url: str) -> Dict[str, Any]:
+        """Auto-heal malformed or non-existent Sentinel-2 S3 URL using Earth Search STAC."""
+        return self.validator.auto_heal_sentinel2_url(url)
 
     def query_catalog(
         self,

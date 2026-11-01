@@ -66,6 +66,14 @@ class STACQueryRequest(BaseModel):
     max_cloud_cover: Optional[float] = None
 
 
+class CatalogValidateRequest(BaseModel):
+    url: str
+
+
+class CatalogHealRequest(BaseModel):
+    url: str
+
+
 # =============================================================================
 # HTML / CSS / JS Single Page App Template
 # =============================================================================
@@ -503,6 +511,22 @@ STUDIO_HTML = """<!DOCTYPE html>
             </div>
             <button class="btn btn-primary" onclick="searchSTAC()">🔍 Search STAC Items</button>
           </div>
+
+          <div class="card">
+            <h3 class="card-title">Catalog URL Validator & Auto-Healer</h3>
+            <p style="font-size:0.8rem; color:var(--text-muted); margin-bottom:0.75rem;">
+              Test remote COG asset existence (HTTP HEAD) or auto-heal broken/malformed Sentinel-2 S3 paths to nearest valid satellite overpasses.
+            </p>
+            <div class="form-group">
+              <label>Target COG URL</label>
+              <input type="text" id="catalogUrlInput" class="form-control" placeholder="https://.../B02.tif" value="https://sentinel-cogs.s3.amazonaws.com/sentinel-s2-l2a-cogs/20/M/PA/2023/11/S2A_20231124/B02.tif">
+            </div>
+            <div style="display:flex; gap:0.5rem;">
+              <button class="btn btn-secondary" style="flex:1;" onclick="validateCatalogUrl()">🩺 Test URL</button>
+              <button class="btn btn-primary" style="flex:1;" onclick="healCatalogUrl()">✨ Auto-Heal Path</button>
+            </div>
+            <div id="catalogCheckResult" style="margin-top:0.75rem; font-size:0.85rem; display:none;"></div>
+          </div>
         </div>
 
         <div>
@@ -901,6 +925,55 @@ STUDIO_HTML = """<!DOCTYPE html>
       }
     }
 
+    async function validateCatalogUrl() {
+      const url = document.getElementById('catalogUrlInput').value.trim();
+      const resDiv = document.getElementById('catalogCheckResult');
+      resDiv.style.display = 'block';
+      resDiv.innerHTML = '<span style="color:var(--text-muted);">Testing remote COG asset via HTTP HEAD...</span>';
+      try {
+        const resp = await fetch('/studio/api/catalog/validate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url })
+        });
+        const data = await resp.json();
+        if (data.exists) {
+          resDiv.innerHTML = `<span style="color:var(--success); font-weight:700;">✓ Asset Exists (HTTP ${data.status_code})</span><br><code style="font-size:0.75rem; word-break:break-all;">${data.url}</code>`;
+        } else {
+          resDiv.innerHTML = `<span style="color:var(--danger); font-weight:700;">✗ Broken / Missing Asset (${data.message})</span><br><small style="color:var(--text-muted);">Click "Auto-Heal Path" to find the nearest valid pass date.</small>`;
+        }
+      } catch (err) {
+        resDiv.innerHTML = `<span style="color:var(--danger);">Validation failed: ${err}</span>`;
+      }
+    }
+
+    async function healCatalogUrl() {
+      const url = document.getElementById('catalogUrlInput').value.trim();
+      const resDiv = document.getElementById('catalogCheckResult');
+      resDiv.style.display = 'block';
+      resDiv.innerHTML = '<span style="color:var(--text-muted);">Querying STAC orbit catalog to resolve valid pass...</span>';
+      try {
+        const resp = await fetch('/studio/api/catalog/heal', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url })
+        });
+        const data = await resp.json();
+        if (data.success) {
+          document.getElementById('catalogUrlInput').value = data.verified_band_url;
+          resDiv.innerHTML = `
+            <span style="color:var(--success); font-weight:700;">✨ Auto-Healed to Verified Pass!</span><br>
+            <small><b>Resolved Date:</b> ${data.resolved_date} | <b>Granule:</b> ${data.matched_granule_id}</small><br>
+            <code style="font-size:0.75rem; word-break:break-all;">${data.verified_band_url}</code>
+          `;
+        } else {
+          resDiv.innerHTML = `<span style="color:var(--danger); font-weight:700;">Could not auto-heal: ${data.error || 'Unknown error'}</span>`;
+        }
+      } catch (err) {
+        resDiv.innerHTML = `<span style="color:var(--danger);">Auto-heal failed: ${err}</span>`;
+      }
+    }
+
     // Startup initialization
     window.addEventListener('DOMContentLoaded', () => {
       initChart();
@@ -1018,6 +1091,14 @@ def create_studio_app() -> FastAPI:
             max_cloud_cover=req.max_cloud_cover,
         )
         return items
+
+    @app.post("/studio/api/catalog/validate")
+    def catalog_validate_endpoint(req: CatalogValidateRequest):
+        return stac_mgr.validate_url(req.url)
+
+    @app.post("/studio/api/catalog/heal")
+    def catalog_heal_endpoint(req: CatalogHealRequest):
+        return stac_mgr.heal_url(req.url)
 
     # --- Checkpoints API Endpoints ---
     @app.get("/studio/api/checkpoints")
