@@ -34,6 +34,7 @@ def parse_args():
     parser.add_argument("--model-type", type=str, default="siamese", choices=["siamese", "multimodal", "unet"])
     parser.add_argument("--use-lora", action="store_true", help="Apply LoRA parameter-efficient fine-tuning")
     parser.add_argument("--lora-rank", type=int, default=8, help="LoRA rank")
+    parser.add_argument("--lora-alpha", type=float, default=16.0, help="LoRA alpha scaling factor")
     parser.add_argument("--epochs", type=int, default=3, help="Number of training epochs")
     parser.add_argument("--batch-size", type=int, default=8, help="Batch size (e.g. 8, 16, 32)")
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
@@ -141,7 +142,7 @@ def main():
     # 3. LoRA PEFT injection if requested
     if args.use_lora:
         print("3. Injecting LoRA low-rank decomposition adapters into attention layers...")
-        model, lora_stats = apply_lora_to_model(model, rank=args.lora_rank, alpha=16.0)
+        model, lora_stats = apply_lora_to_model(model, rank=args.lora_rank, alpha=args.lora_alpha)
         print(f"   Total Parameters:     {lora_stats['total_parameters']:,}")
         print(f"   Trainable Parameters: {lora_stats['trainable_parameters']:,} ({lora_stats['trainable_fraction']*100:.2f}%)")
         print(f"   Adapted Layers:       {lora_stats['adapted_layers']}")
