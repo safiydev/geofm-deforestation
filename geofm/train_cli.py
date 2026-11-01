@@ -36,7 +36,7 @@ def parse_args():
     parser.add_argument("--lora-rank", type=int, default=8, help="LoRA rank")
     parser.add_argument("--lora-alpha", type=float, default=16.0, help="LoRA alpha scaling factor")
     parser.add_argument("--epochs", type=int, default=3, help="Number of training epochs")
-    parser.add_argument("--batch-size", type=int, default=8, help="Batch size (e.g. 8, 16, 32)")
+    parser.add_argument("--batch-size", type=int, default=16, help="Batch size (e.g. 8, 16, 32)")
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
     parser.add_argument("--loss", type=str, default="compound", choices=["compound", "focal_tversky", "focal"])
     parser.add_argument("--num-samples", type=int, default=16, help="Synthetic dataset size for training")
@@ -44,9 +44,10 @@ def parse_args():
     parser.add_argument("--data-dir", type=str, default=None, help="Directory containing cached .npz chips")
     parser.add_argument("--cache-dir", type=str, default=None, help="Alias for --data-dir")
     parser.add_argument("--force-generate", action="store_true", help="Force regenerate synthetic data")
-    parser.add_argument("--num-workers", type=int, default=0, help="DataLoader worker processes")
+    parser.add_argument("--num-workers", type=int, default=2 if torch.cuda.is_available() else 0, help="DataLoader worker processes")
     parser.add_argument("--prefetch-factor", type=int, default=2, help="Batches to prefetch per worker")
     parser.add_argument("--ram-cache-gb", type=float, default=None, help="Host RAM budget for chip caching in GB")
+    parser.add_argument("--preload", action="store_true", help="Preload chips into RAM cache at startup (default: lazy streaming with dynamic RAM caching)")
     parser.add_argument("--no-preload", action="store_true", help="Disable preloading chips into RAM cache")
     parser.add_argument("--use-amp", action="store_true", default=True, help="Enable Automatic Mixed Precision (FP16)")
     parser.add_argument("--no-amp", action="store_false", dest="use_amp", help="Disable Automatic Mixed Precision")
@@ -80,12 +81,13 @@ def main():
         pass
 
     has_cache = os.path.exists(manifest_file) or (os.path.isdir(cache_dir) and any(Path(cache_dir).glob("*.npz")))
+    should_preload = args.preload and not args.no_preload
     if has_cache and not args.force_generate:
         print(f"1. Loading chip cache from {cache_dir} with bounded RAM acceleration...")
         dataset = LazyGeospatialDataset(
             cache_dir=cache_dir,
             max_ram_cache_gb=args.ram_cache_gb,
-            preload_cache=not args.no_preload,
+            preload_cache=should_preload,
         )
     else:
         print(f"1. Generating {args.num_samples} chips via zero-RAM disk streaming...")
@@ -99,7 +101,7 @@ def main():
         dataset = LazyGeospatialDataset(
             cache_dir=cache_dir,
             max_ram_cache_gb=args.ram_cache_gb,
-            preload_cache=not args.no_preload,
+            preload_cache=should_preload,
         )
 
     print(f"   Dataset size: {len(dataset)} chips indexed.")

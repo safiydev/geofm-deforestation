@@ -223,47 +223,65 @@ class LazyGeospatialDataset(Dataset):
         else:
             logger.warning("Initialized empty LazyGeospatialDataset.")
 
-        # Bounded High-Water Mark In-Memory RAM Caching
+        # Bounded High-Water Mark In-Memory RAM Caching with Live Available RAM Guard
+        try:
+            import psutil
+            vm = psutil.virtual_memory()
+            avail_gb = vm.available / (1024**3)
+            # Always guarantee a strict 3.0 GB safety buffer for OS, Python, and PyTorch runtime
+            safe_ceiling_gb = max(0.0, avail_gb - 3.0)
+        except Exception:
+            safe_ceiling_gb = 1.0
+
         if max_ram_cache_gb is None:
-            try:
-                import psutil
-                vm = psutil.virtual_memory()
-                # Reserve 3.5 GB for OS, PyTorch model, and CUDA driver
-                avail_gb = vm.available / 1e9
-                self.max_cache_gb = max(0.0, min(8.0, avail_gb - 3.5))
-            except Exception:
-                self.max_cache_gb = 2.0
+            self.max_cache_gb = min(3.0, safe_ceiling_gb)
         else:
-            self.max_cache_gb = float(max_ram_cache_gb)
+            # Strictly cap requested cache by what is safely available right now
+            self.max_cache_gb = max(0.0, min(float(max_ram_cache_gb), safe_ceiling_gb))
 
         self.max_cache_bytes = int(self.max_cache_gb * (1024**3))
         self._ram_cache: Dict[int, Dict[str, Any]] = {}
         self._current_cache_bytes: int = 0
 
-        logger.info(
-            f"Initialized LazyGeospatialDataset with {len(self.samples_meta)} chips "
-            f"(RAM Cache Budget: {self.max_cache_gb:.2f} GB)"
+        mode_str = (
+            f"RAM Cache Budget: {self.max_cache_gb:.2f} GB"
+            if self.max_cache_bytes > 0
+            else "Pure Zero-RAM Streaming Mode"
         )
+        logger.info(f"Initialized LazyGeospatialDataset with {len(self.samples_meta)} chips ({mode_str})")
 
-        if preload_cache and self.max_cache_bytes > 0:
+        if preload_cache and self.max_cache_bytes > 50 * (1024**2):
             self.preload_into_ram()
 
     def preload_into_ram(self, max_chips: Optional[int] = None) -> int:
         """Pre-cache chips directly into host RAM up to the safe memory budget."""
+        if self.max_cache_bytes <= 0:
+            return 0
+
         limit = len(self.samples_meta) if max_chips is None else min(len(self.samples_meta), max_chips)
         cached_count = 0
         for i in range(limit):
             if self._current_cache_bytes >= self.max_cache_bytes:
                 break
+            try:
+                import psutil
+                if psutil.virtual_memory().available < 2.5 * (1024**3):
+                    logger.info("RAM limit reached during preloading. Preserving safety margin.")
+                    break
+            except Exception:
+                pass
+
             self._load_and_maybe_cache(i)
             if i in self._ram_cache:
                 cached_count += 1
+            else:
+                break
 
         pct_dataset = (cached_count / max(1, len(self.samples_meta))) * 100
         used_mb = self._current_cache_bytes / (1024**2)
         budget_mb = self.max_cache_gb * 1024
         print(
-            f"  ⚡ [RAM Accelerator] Pre-cached {cached_count}/{len(self.samples_meta)} chips "
+            f"  ⚡ [RAM Accelerator] Cached {cached_count}/{len(self.samples_meta)} chips "
             f"({pct_dataset:.1f}% of dataset) into RAM ({used_mb:.1f} MB / {budget_mb:.0f} MB budget)"
         )
         return cached_count
@@ -319,8 +337,17 @@ class LazyGeospatialDataset(Dataset):
                 item_bytes += cloud_arr.nbytes
 
             if self._current_cache_bytes + item_bytes <= self.max_cache_bytes:
-                self._ram_cache[idx] = record
-                self._current_cache_bytes += item_bytes
+                can_cache = True
+                try:
+                    import psutil
+                    if psutil.virtual_memory().available < 2.5 * (1024**3):
+                        can_cache = False
+                except Exception:
+                    pass
+
+                if can_cache:
+                    self._ram_cache[idx] = record
+                    self._current_cache_bytes += item_bytes
 
             return record
 
