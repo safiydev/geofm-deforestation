@@ -189,11 +189,27 @@ uvicorn geofm.api.app:app --host 0.0.0.0 --port 8000 --reload
 - `POST /api/v1/stac/search`: Queries STAC catalog metadata.
 - `POST /api/v1/webhooks/register`: Subscribes external systems to alert streams with HMAC-SHA256 signature verification.
 
+### 8. Interactive Web Training Studio & EUDR Suite (`studio.py` / `geofm/studio/`)
+Self-contained interactive visual suite with dual runtime support (Streamlit & Standalone FastAPI + Leaflet.js + Chart.js):
+- **Tab 1: AI Model Training Studio**: Select architecture (Siamese Change Detector, U-Net ViT Hybrid, Multimodal Cross-Attention), configure LoRA PEFT ($r=2..64, \alpha=4..128$), select class-imbalanced compound loss, tune learning rate/epochs, trigger training runs with real-time loss & IoU curves, and inspect saved checkpoint metadata.
+- **Tab 2: Satellite Inference & Interactive Map**: Generate bitemporal satellite scenes ($T_1$ vs $T_2$, Sentinel-2 RGB/NIR, NDVI, Sentinel-1 SAR VV/VH), run neural inference with configurable probability threshold and Minimum Mapping Unit (MMU ha), and plot detected deforestation clusters on interactive Leaflet maps with severity levels (Critical, High, Medium).
+- **Tab 3: EUDR Due Diligence & Regulatory Compliance**: Upload or test farm plots against legal mandates under Regulation (EU) 2023/1115 (Dec 31, 2020 cutoff, $\le 4\,\text{ha}$ point vs $> 4\,\text{ha}$ polygon, $\ge 6$ decimal precision, Annex I commodities), intersect with AI alerts, compute Olofsson et al. (2014) area-adjusted accuracy with 95% confidence intervals, and generate compliance audit verdicts.
+- **Tab 4: STAC Satellite Catalog Explorer**: Query Sentinel-2 and Sentinel-1 STAC items across Amazon, Congo, and Borneo biomes by bounding box, date range, and cloud cover.
+
+#### Launching the Studio:
+```bash
+# Standalone high-performance web dashboard (FastAPI + Leaflet + Chart.js):
+python studio.py --port 8501
+
+# Or with Streamlit (if installed):
+streamlit run studio.py
+```
+
 ---
 
 ## Verification & Testing Suite
 
-All 42 unit and integration tests execute with 100% pass rate:
+All 57 unit and integration tests execute with a 100% pass rate:
 ```bash
 pytest tests/ -v
 ```
@@ -204,12 +220,18 @@ tests/test_api.py::test_detect_endpoint PASSED
 tests/test_api.py::test_eudr_audit_endpoint PASSED
 tests/test_api.py::test_stac_search_endpoint PASSED
 tests/test_api.py::test_webhook_register_and_dispatch PASSED
+tests/test_api.py::test_detect_endpoint_multipolygon PASSED
+tests/test_api.py::test_stac_search_endpoint_with_naive_dates PASSED
+tests/test_api.py::test_eudr_audit_endpoint_unregulated_commodity PASSED
 tests/test_baselines.py::test_ccdc_detects_abrupt_step_deforestation PASSED
 tests/test_baselines.py::test_bfast_ols_mosum_monitoring PASSED
 tests/test_baselines.py::test_ndvi_delta_baseline PASSED
 tests/test_compliance.py::test_eudr_validator_rules PASSED
 tests/test_compliance.py::test_dds_auditor_compliance_check PASSED
 tests/test_compliance.py::test_olofsson_accuracy_assessment PASSED
+tests/test_compliance.py::test_eudr_commodity_scope_validation PASSED
+tests/test_compliance.py::test_dds_auditor_multipolygon_alert_overlap PASSED
+tests/test_compliance.py::test_dds_auditor_unregulated_commodity_rejection PASSED
 tests/test_losses.py::test_binary_focal_loss PASSED
 tests/test_losses.py::test_tversky_loss_asymmetry PASSED
 tests/test_losses.py::test_compound_loss_backward PASSED
@@ -221,14 +243,34 @@ tests/test_postprocessing.py::test_polygon_area_and_point_in_polygon PASSED
 tests/test_postprocessing.py::test_polygon_intersection PASSED
 tests/test_postprocessing.py::test_douglas_peucker_simplification PASSED
 tests/test_postprocessing.py::test_polygonizer_mmu_filter PASSED
+tests/test_postprocessing.py::test_polygon_intersection_crossing_without_vertices_inside PASSED
+tests/test_postprocessing.py::test_is_point_in_polygon_unclosed_triangle PASSED
+tests/test_postprocessing.py::test_closed_polygon_simplification_all_collinear_edges PASSED
+tests/test_postprocessing.py::test_polygonizer_l_shape_and_multipolygon PASSED
 tests/test_preprocessing.py::test_optical_normalization_and_indices PASSED
 tests/test_preprocessing.py::test_optical_cloud_and_shadow_masking PASSED
 tests/test_preprocessing.py::test_sar_decibels_and_speckle_filters PASSED
 tests/test_preprocessing.py::test_sar_hampel_filter PASSED
 tests/test_preprocessing.py::test_cog_window_reader_and_chipping PASSED
 tests/test_preprocessing.py::test_stac_manager PASSED
+tests/test_studio.py::test_image_rendering_utilities PASSED
+tests/test_studio.py::test_training_logger_and_json_export PASSED
+tests/test_studio.py::test_studio_inference_manager PASSED
+tests/test_studio.py::test_studio_compliance_manager PASSED
+tests/test_studio.py::test_studio_stac_manager PASSED
+tests/test_studio.py::test_checkpoint_manager PASSED
+tests/test_studio.py::test_streamlit_app_graceful_run PASSED
+tests/test_studio.py::test_web_studio_get_index PASSED
+tests/test_studio.py::test_web_studio_api_infer PASSED
+tests/test_studio.py::test_web_studio_api_eudr_presets PASSED
+tests/test_studio.py::test_web_studio_api_eudr_audit PASSED
+tests/test_studio.py::test_web_studio_api_olofsson PASSED
+tests/test_studio.py::test_web_studio_api_stac_search PASSED
+tests/test_studio.py::test_web_studio_api_checkpoints PASSED
+tests/test_studio.py::test_web_studio_api_train PASSED
 tests/test_training.py::test_spatial_block_cross_validation_split PASSED
+tests/test_training.py::test_trainer_type_hints PASSED
 tests/test_training.py::test_deforestation_metrics_computation PASSED
 tests/test_training.py::test_trainer_single_epoch_run PASSED
-======================== 42 passed in 7.62s ========================
+======================= 57 passed in 14.48s ========================
 ```
