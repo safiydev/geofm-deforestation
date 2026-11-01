@@ -141,13 +141,12 @@ DeforestationDataset = GeospatialDeforestationDataset
 
 
 class LazyGeospatialDataset(Dataset):
-    """Zero-RAM disk-backed PyTorch Dataset for large-scale geospatial chip collections.
+    """Zero-RAM disk-backed PyTorch Dataset with bounded in-memory RAM caching.
 
-    Instead of holding uncompressed multispectral satellite imagery in host RAM (which
-    crashes on 12.7 GB Google Colab when scaling past 1,000 chips), this dataset loads chips
-    on-demand in `__getitem__` directly from cached .npz files on disk. Memory footprint
-    remains strictly bounded (<50 MB) regardless of whether the dataset contains 100 or
-    100,000 chips.
+    By default, indexes lightweight coordinate metadata without holding full image arrays in RAM.
+    When max_ram_cache_gb is configured (or auto-detected), it aggressively caches accessed chips
+    directly into fast host RAM up to a strict safe memory budget (e.g. 7-8 GB out of 12.7 GB),
+    preventing disk I/O bottlenecks while guaranteeing safety against OOM crashes.
     """
 
     def __init__(
@@ -156,6 +155,8 @@ class LazyGeospatialDataset(Dataset):
         file_paths: Optional[List[str]] = None,
         metadata: Optional[List[Dict[str, Any]]] = None,
         transform: Optional[Any] = None,
+        max_ram_cache_gb: Optional[float] = None,
+        preload_cache: bool = False,
     ):
         self.transform = transform
         self.cache_dir = Path(cache_dir) if cache_dir else None
@@ -222,12 +223,56 @@ class LazyGeospatialDataset(Dataset):
         else:
             logger.warning("Initialized empty LazyGeospatialDataset.")
 
-        logger.info(f"Initialized LazyGeospatialDataset with {len(self.samples_meta)} chips (Zero-RAM mode)")
+        # Bounded High-Water Mark In-Memory RAM Caching
+        if max_ram_cache_gb is None:
+            try:
+                import psutil
+                vm = psutil.virtual_memory()
+                # Reserve 3.5 GB for OS, PyTorch model, and CUDA driver
+                avail_gb = vm.available / 1e9
+                self.max_cache_gb = max(0.0, min(8.0, avail_gb - 3.5))
+            except Exception:
+                self.max_cache_gb = 2.0
+        else:
+            self.max_cache_gb = float(max_ram_cache_gb)
 
-    def __len__(self) -> int:
-        return len(self.samples_meta)
+        self.max_cache_bytes = int(self.max_cache_gb * (1024**3))
+        self._ram_cache: Dict[int, Dict[str, Any]] = {}
+        self._current_cache_bytes: int = 0
 
-    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        logger.info(
+            f"Initialized LazyGeospatialDataset with {len(self.samples_meta)} chips "
+            f"(RAM Cache Budget: {self.max_cache_gb:.2f} GB)"
+        )
+
+        if preload_cache and self.max_cache_bytes > 0:
+            self.preload_into_ram()
+
+    def preload_into_ram(self, max_chips: Optional[int] = None) -> int:
+        """Pre-cache chips directly into host RAM up to the safe memory budget."""
+        limit = len(self.samples_meta) if max_chips is None else min(len(self.samples_meta), max_chips)
+        cached_count = 0
+        for i in range(limit):
+            if self._current_cache_bytes >= self.max_cache_bytes:
+                break
+            self._load_and_maybe_cache(i)
+            if i in self._ram_cache:
+                cached_count += 1
+
+        pct_dataset = (cached_count / max(1, len(self.samples_meta))) * 100
+        used_mb = self._current_cache_bytes / (1024**2)
+        budget_mb = self.max_cache_gb * 1024
+        print(
+            f"  ⚡ [RAM Accelerator] Pre-cached {cached_count}/{len(self.samples_meta)} chips "
+            f"({pct_dataset:.1f}% of dataset) into RAM ({used_mb:.1f} MB / {budget_mb:.0f} MB budget)"
+        )
+        return cached_count
+
+    def _load_and_maybe_cache(self, idx: int) -> Dict[str, Any]:
+        """Load chip data from RAM cache or disk, caching in RAM if within budget."""
+        if idx in self._ram_cache:
+            return self._ram_cache[idx]
+
         meta = self.samples_meta[idx]
         file_path = meta["file_path"]
 
@@ -244,30 +289,67 @@ class LazyGeospatialDataset(Dataset):
             lat = float(meta.get("lat", data.get("lat", 0.0)))
             block_id = int(meta.get("block_id", data.get("block_id", 0)))
 
-            item = {
-                "sample_id": sample_id,
-                "t1": torch.from_numpy(t1_arr),
-                "t2": torch.from_numpy(t2_arr),
-                "target": torch.from_numpy(tgt_arr),
-                "lon": torch.tensor(lon, dtype=torch.float32),
-                "lat": torch.tensor(lat, dtype=torch.float32),
-                "block_id": torch.tensor(block_id, dtype=torch.long),
-            }
-
+            sar_arr = None
             if "sar_data" in data and data["sar_data"] is not None:
                 sar_arr = np.nan_to_num(data["sar_data"], nan=0.0, posinf=0.0, neginf=-30.0).astype(np.float32)
-                item["sar"] = torch.from_numpy(sar_arr)
 
+            cloud_arr = None
             if "cloud_mask" in data and data["cloud_mask"] is not None:
-                c_arr = np.nan_to_num(data["cloud_mask"], nan=0.0).astype(np.float32)
-                if c_arr.ndim == 2:
-                    c_arr = c_arr[np.newaxis, ...]
-                item["cloud_mask"] = torch.from_numpy(c_arr)
+                cloud_arr = np.nan_to_num(data["cloud_mask"], nan=0.0).astype(np.float32)
+                if cloud_arr.ndim == 2:
+                    cloud_arr = cloud_arr[np.newaxis, ...]
 
-            if self.transform is not None:
-                item = self.transform(item)
+            record = {
+                "sample_id": sample_id,
+                "t1": t1_arr,
+                "t2": t2_arr,
+                "target": tgt_arr,
+                "lon": lon,
+                "lat": lat,
+                "block_id": block_id,
+                "sar": sar_arr,
+                "cloud_mask": cloud_arr,
+            }
 
-            return item
+            # If space is available in safe RAM budget, cache it in RAM
+            item_bytes = t1_arr.nbytes + t2_arr.nbytes + tgt_arr.nbytes
+            if sar_arr is not None:
+                item_bytes += sar_arr.nbytes
+            if cloud_arr is not None:
+                item_bytes += cloud_arr.nbytes
+
+            if self._current_cache_bytes + item_bytes <= self.max_cache_bytes:
+                self._ram_cache[idx] = record
+                self._current_cache_bytes += item_bytes
+
+            return record
+
+    def __len__(self) -> int:
+        return len(self.samples_meta)
+
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        record = self._load_and_maybe_cache(idx)
+
+        item = {
+            "sample_id": record["sample_id"],
+            "t1": torch.from_numpy(record["t1"]),
+            "t2": torch.from_numpy(record["t2"]),
+            "target": torch.from_numpy(record["target"]),
+            "lon": torch.tensor(record["lon"], dtype=torch.float32),
+            "lat": torch.tensor(record["lat"], dtype=torch.float32),
+            "block_id": torch.tensor(record["block_id"], dtype=torch.long),
+        }
+
+        if record["sar"] is not None:
+            item["sar"] = torch.from_numpy(record["sar"])
+
+        if record["cloud_mask"] is not None:
+            item["cloud_mask"] = torch.from_numpy(record["cloud_mask"])
+
+        if self.transform is not None:
+            item = self.transform(item)
+
+        return item
 
     def get_coordinates(self) -> List[Tuple[float, float]]:
         """Return list of (lon, lat) tuples without loading image arrays into RAM."""
@@ -333,19 +415,27 @@ def cache_dataset_to_npz(samples: List[GeoSample], output_dir: str) -> List[str]
 def load_dataset_from_npz(
     cache_dir: str,
     lazy: bool = False,
+    max_ram_cache_gb: Optional[float] = None,
+    preload_cache: bool = False,
 ) -> Union[List[GeoSample], LazyGeospatialDataset]:
     """Load cached .npz geospatial chips from directory.
 
     Args:
         cache_dir: Directory containing .npz files.
-        lazy: If True, returns a zero-RAM LazyGeospatialDataset for large collections (10,000+ chips).
+        lazy: If True, returns a memory-optimized LazyGeospatialDataset.
               If False (default), returns in-memory List[GeoSample] for backward compatibility.
+        max_ram_cache_gb: Maximum RAM budget (in GB) to allocate for caching chips in memory.
+        preload_cache: Pre-load chips into RAM up to budget for 0 ms disk latency.
 
     Returns:
         LazyGeospatialDataset (if lazy=True) or List of GeoSample objects (if lazy=False).
     """
     if lazy:
-        return LazyGeospatialDataset(cache_dir=cache_dir)
+        return LazyGeospatialDataset(
+            cache_dir=cache_dir,
+            max_ram_cache_gb=max_ram_cache_gb,
+            preload_cache=preload_cache,
+        )
 
     path = Path(cache_dir)
     npz_files = sorted(list(path.glob("*.npz")))

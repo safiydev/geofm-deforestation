@@ -250,7 +250,20 @@ def test_lazy_dataset_and_streaming_cache(tmp_path):
         model=model,
         checkpoint_dir=str(tmp_path / "lazy_ckpt"),
         model_type="siamese",
+        use_amp=False,
+        gradient_accumulation_steps=2,
     )
     history = trainer.fit(train_loader, val_loader, epochs=1)
     assert len(history) == 1
     assert "val_iou" in history[0]
+
+    # Test Bounded RAM Caching and Preloading
+    ram_cached_ds = LazyGeospatialDataset(
+        cache_dir=cache_dir,
+        max_ram_cache_gb=0.1,  # 100 MB budget
+        preload_cache=True,
+    )
+    assert len(ram_cached_ds._ram_cache) > 0
+    # Second access must come from RAM cache without disk load
+    cached_item = ram_cached_ds[0]
+    assert cached_item["t1"].shape == (4, 16, 16)

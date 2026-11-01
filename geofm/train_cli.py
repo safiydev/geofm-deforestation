@@ -35,7 +35,7 @@ def parse_args():
     parser.add_argument("--use-lora", action="store_true", help="Apply LoRA parameter-efficient fine-tuning")
     parser.add_argument("--lora-rank", type=int, default=8, help="LoRA rank")
     parser.add_argument("--epochs", type=int, default=3, help="Number of training epochs")
-    parser.add_argument("--batch-size", type=int, default=4, help="Batch size")
+    parser.add_argument("--batch-size", type=int, default=8, help="Batch size (e.g. 8, 16, 32)")
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
     parser.add_argument("--loss", type=str, default="compound", choices=["compound", "focal_tversky", "focal"])
     parser.add_argument("--num-samples", type=int, default=16, help="Synthetic dataset size for training")
@@ -44,22 +44,30 @@ def parse_args():
     parser.add_argument("--cache-dir", type=str, default=None, help="Alias for --data-dir")
     parser.add_argument("--force-generate", action="store_true", help="Force regenerate synthetic data")
     parser.add_argument("--num-workers", type=int, default=0, help="DataLoader worker processes")
+    parser.add_argument("--prefetch-factor", type=int, default=2, help="Batches to prefetch per worker")
+    parser.add_argument("--ram-cache-gb", type=float, default=None, help="Host RAM budget for chip caching in GB")
+    parser.add_argument("--no-preload", action="store_true", help="Disable preloading chips into RAM cache")
+    parser.add_argument("--use-amp", action="store_true", default=True, help="Enable Automatic Mixed Precision (FP16)")
+    parser.add_argument("--no-amp", action="store_false", dest="use_amp", help="Disable Automatic Mixed Precision")
+    parser.add_argument("--grad-accum-steps", type=int, default=1, help="Gradient accumulation steps")
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
     print("=" * 65)
-    print("  GeoFM Deforestation Model Training Pipeline")
+    print("  GeoFM High-Throughput Deforestation Training Pipeline")
     print("=" * 65)
     print(f"Model Architecture: {args.model_type.upper()}")
     print(f"PEFT / LoRA Active: {args.use_lora} (Rank: {args.lora_rank})")
     print(f"Loss Function:      {args.loss}")
     print(f"Epochs:             {args.epochs}")
+    print(f"Batch Size:         {args.batch_size}")
     print(f"Learning Rate:      {args.lr}")
+    print(f"Hardware Compute:   AMP (FP16) = {args.use_amp} | Workers = {args.num_workers}")
     print("-" * 65)
 
-    # 1. Dataset Loading (Zero-RAM Lazy Loading)
+    # 1. Dataset Loading (High-Speed Memory Budgeted Caching)
     cache_dir = args.data_dir or args.cache_dir or "./data/chips_cache"
     manifest_file = os.path.join(cache_dir, "manifest.jsonl")
 
@@ -72,8 +80,12 @@ def main():
 
     has_cache = os.path.exists(manifest_file) or (os.path.isdir(cache_dir) and any(Path(cache_dir).glob("*.npz")))
     if has_cache and not args.force_generate:
-        print(f"1. Loading existing chip cache from {cache_dir} (Zero-RAM lazy streaming)...")
-        dataset = LazyGeospatialDataset(cache_dir=cache_dir)
+        print(f"1. Loading chip cache from {cache_dir} with bounded RAM acceleration...")
+        dataset = LazyGeospatialDataset(
+            cache_dir=cache_dir,
+            max_ram_cache_gb=args.ram_cache_gb,
+            preload_cache=not args.no_preload,
+        )
     else:
         print(f"1. Generating {args.num_samples} chips via zero-RAM disk streaming...")
         stream_and_cache_synthetic_dataset(
@@ -83,9 +95,13 @@ def main():
             width=64,
             show_progress=True,
         )
-        dataset = LazyGeospatialDataset(cache_dir=cache_dir)
+        dataset = LazyGeospatialDataset(
+            cache_dir=cache_dir,
+            max_ram_cache_gb=args.ram_cache_gb,
+            preload_cache=not args.no_preload,
+        )
 
-    print(f"   Dataset size: {len(dataset)} chips indexed on disk.")
+    print(f"   Dataset size: {len(dataset)} chips indexed.")
     splitter = SpatialBlockSplitter(grid_size_deg=0.1, train_ratio=0.7, val_ratio=0.3, test_ratio=0.0)
     train_idx, val_idx, _ = splitter.split(dataset)
 
@@ -98,6 +114,8 @@ def main():
         shuffle=True,
         num_workers=args.num_workers,
         pin_memory=torch.cuda.is_available(),
+        prefetch_factor=args.prefetch_factor if args.num_workers > 0 else None,
+        persistent_workers=(args.num_workers > 0),
     )
     val_loader = DataLoader(
         val_sub,
@@ -105,6 +123,8 @@ def main():
         shuffle=False,
         num_workers=args.num_workers,
         pin_memory=torch.cuda.is_available(),
+        prefetch_factor=args.prefetch_factor if args.num_workers > 0 else None,
+        persistent_workers=(args.num_workers > 0),
     )
 
     print(f"   Spatial split complete: {len(train_sub)} train samples, {len(val_sub)} val samples.")
@@ -134,12 +154,14 @@ def main():
     else:
         criterion = BinaryFocalLoss(alpha=0.75, gamma=2.0)
 
-    # 5. Trainer
+    # 5. Trainer with Hardware Maximization
     trainer = DeforestationTrainer(
         model=model,
         criterion=criterion,
         checkpoint_dir=args.checkpoint_dir,
         model_type=args.model_type,
+        use_amp=args.use_amp,
+        gradient_accumulation_steps=args.grad_accum_steps,
     )
 
     # 6. Run Training Loop

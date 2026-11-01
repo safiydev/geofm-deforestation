@@ -41,15 +41,27 @@ class DeforestationTrainer:
         experiment_name: Optional[str] = None,
         enable_tensorboard: bool = True,
         epoch_callback: Optional[Callable[[int, Dict[str, Any]], None]] = None,
+        use_amp: bool = True,
+        gradient_accumulation_steps: int = 1,
     ):
         if device is None:
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         else:
             self.device = torch.device(device)
 
+        # Optimize cuDNN kernels for fixed image sizes on NVIDIA GPUs
+        if self.device.type == "cuda":
+            torch.backends.cudnn.benchmark = True
+
         self.model = model.to(self.device)
         self.model_type = model_type
         self.learning_rate = float(learning_rate)
+        self.gradient_accumulation_steps = max(1, int(gradient_accumulation_steps))
+
+        # Automatic Mixed Precision (AMP) on CUDA
+        self.use_amp = bool(use_amp and self.device.type == "cuda")
+        self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp) if self.use_amp else None
+
         self.criterion = (
             criterion if criterion is not None else CompoundDeforestationLoss()
         )
@@ -86,47 +98,72 @@ class DeforestationTrainer:
         self.patience_counter: int = 0
 
     def _forward_step(self, batch: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Route batch tensors according to model type."""
-        targets = batch["target"].to(self.device)
+        """Route batch tensors according to model type with non_blocking asynchronous GPU transfers."""
+        targets = batch["target"].to(self.device, non_blocking=True)
 
         if self.model_type == "siamese":
-            t1 = batch["t1"].to(self.device)
-            t2 = batch["t2"].to(self.device)
+            t1 = batch["t1"].to(self.device, non_blocking=True)
+            t2 = batch["t2"].to(self.device, non_blocking=True)
             logits = self.model(t1, t2)
         elif self.model_type == "multimodal":
-            opt = batch["t2"].to(self.device)
-            sar = batch["sar"].to(self.device)
+            opt = batch["t2"].to(self.device, non_blocking=True)
+            sar = batch["sar"].to(self.device, non_blocking=True)
             cloud_mask = batch.get("cloud_mask")
             if cloud_mask is not None:
-                cloud_mask = cloud_mask.to(self.device)
+                cloud_mask = cloud_mask.to(self.device, non_blocking=True)
             logits = self.model(opt, sar, cloud_mask=cloud_mask)
         else:
             # Standard single image U-Net
-            x = batch["t2"].to(self.device)
+            x = batch["t2"].to(self.device, non_blocking=True)
             logits = self.model(x)
 
         return logits, targets
 
     def train_epoch(self, dataloader: DataLoader) -> float:
-        """Run a single training epoch."""
+        """Run a single training epoch with AMP acceleration and gradient accumulation."""
         self.model.train()
         total_loss = 0.0
         n_batches = 0
+        self.optimizer.zero_grad(set_to_none=True)
 
-        for batch in dataloader:
-            self.optimizer.zero_grad()
-            logits, targets = self._forward_step(batch)
-            loss = self.criterion(logits, targets)
+        for step, batch in enumerate(dataloader):
+            if self.use_amp:
+                with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
+                    logits, targets = self._forward_step(batch)
+                    loss = self.criterion(logits, targets)
+                    if self.gradient_accumulation_steps > 1:
+                        loss = loss / self.gradient_accumulation_steps
 
-            loss.backward()
-            if self.gradient_clip_norm > 0:
-                torch.nn.utils.clip_grad_norm_(
-                    [p for p in self.model.parameters() if p.requires_grad],
-                    self.gradient_clip_norm,
-                )
-            self.optimizer.step()
+                self.scaler.scale(loss).backward()
 
-            total_loss += float(loss.item())
+                if (step + 1) % self.gradient_accumulation_steps == 0 or (step + 1) == len(dataloader):
+                    if self.gradient_clip_norm > 0:
+                        self.scaler.unscale_(self.optimizer)
+                        torch.nn.utils.clip_grad_norm_(
+                            [p for p in self.model.parameters() if p.requires_grad],
+                            self.gradient_clip_norm,
+                        )
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                    self.optimizer.zero_grad(set_to_none=True)
+            else:
+                logits, targets = self._forward_step(batch)
+                loss = self.criterion(logits, targets)
+                if self.gradient_accumulation_steps > 1:
+                    loss = loss / self.gradient_accumulation_steps
+
+                loss.backward()
+
+                if (step + 1) % self.gradient_accumulation_steps == 0 or (step + 1) == len(dataloader):
+                    if self.gradient_clip_norm > 0:
+                        torch.nn.utils.clip_grad_norm_(
+                            [p for p in self.model.parameters() if p.requires_grad],
+                            self.gradient_clip_norm,
+                        )
+                    self.optimizer.step()
+                    self.optimizer.zero_grad(set_to_none=True)
+
+            total_loss += float(loss.item() * self.gradient_accumulation_steps)
             n_batches += 1
 
         return total_loss / max(1, n_batches)
@@ -134,7 +171,7 @@ class DeforestationTrainer:
     def validate_epoch(
         self, dataloader: DataLoader, threshold: float = 0.5
     ) -> Tuple[float, MetricReport]:
-        """Run validation epoch and evaluate change detection metrics."""
+        """Run validation epoch and evaluate change detection metrics with AMP."""
         self.model.eval()
         total_loss = 0.0
         n_batches = 0
@@ -142,8 +179,13 @@ class DeforestationTrainer:
 
         with torch.no_grad():
             for batch in dataloader:
-                logits, targets = self._forward_step(batch)
-                loss = self.criterion(logits, targets)
+                if self.use_amp:
+                    with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
+                        logits, targets = self._forward_step(batch)
+                        loss = self.criterion(logits, targets)
+                else:
+                    logits, targets = self._forward_step(batch)
+                    loss = self.criterion(logits, targets)
 
                 total_loss += float(loss.item())
                 n_batches += 1
@@ -162,7 +204,13 @@ class DeforestationTrainer:
         eval_threshold: float = 0.5,
     ) -> List[Dict[str, Any]]:
         """Execute full training and validation lifecycle."""
-        print(f"Starting training on device: {self.device} for {epochs} epochs.")
+        if self.device.type == "cuda":
+            device_name = torch.cuda.get_device_name(self.device)
+            vram_total_gb = torch.cuda.get_device_properties(self.device).total_memory / (1024**3)
+            print(f"Starting training on {device_name} ({vram_total_gb:.1f} GB VRAM) for {epochs} epochs.")
+            print(f"  ⚡ GPU Acceleration: AMP (FP16) = {self.use_amp} | cuDNN Benchmark = True | Grad Accum = {self.gradient_accumulation_steps}")
+        else:
+            print(f"Starting training on device: {self.device} for {epochs} epochs.")
         epoch = 0
 
         for epoch in range(1, epochs + 1):
@@ -195,6 +243,9 @@ class DeforestationTrainer:
                     "tn": int(val_metrics.true_negatives),
                 },
             }
+            if self.device.type == "cuda":
+                epoch_record["gpu_vram_used_gb"] = round(torch.cuda.max_memory_allocated(self.device) / (1024**3), 2)
+
             self.history.append(epoch_record)
 
             # TensorBoard logging
