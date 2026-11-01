@@ -190,3 +190,67 @@ def test_dataset_npz_caching_and_loading(tmp_path):
     assert loaded[1].sample_id == "chip_1"
     assert loaded[0].t1_optical.shape == (4, 16, 16)
     assert np.isclose(loaded[1].lon, -59.9)
+
+
+def test_lazy_dataset_and_streaming_cache(tmp_path):
+    from geofm.training.dataset import (
+        LazyGeospatialDataset,
+        SpatialBlockSplitter,
+        load_dataset_from_npz,
+    )
+    from geofm.utils.synthetic_data import stream_and_cache_synthetic_dataset
+
+    cache_dir = str(tmp_path / "streaming_cache")
+    manifest_path, total = stream_and_cache_synthetic_dataset(
+        output_dir=cache_dir,
+        num_samples=12,
+        height=16,
+        width=16,
+        coord_step=0.1,
+        batch_flush=4,
+        show_progress=False,
+    )
+    assert total == 12
+    assert (tmp_path / "streaming_cache" / "manifest.jsonl").exists()
+
+    # Load via LazyGeospatialDataset
+    lazy_ds = LazyGeospatialDataset(cache_dir=cache_dir)
+    assert len(lazy_ds) == 12
+
+    # Load via load_dataset_from_npz with lazy=True
+    lazy_ds_via_loader = load_dataset_from_npz(cache_dir, lazy=True)
+    assert isinstance(lazy_ds_via_loader, LazyGeospatialDataset)
+    assert len(lazy_ds_via_loader) == 12
+
+    # Verify on-demand __getitem__
+    item0 = lazy_ds[0]
+    assert item0["sample_id"] == "chip_00000"
+    assert item0["t1"].shape == (4, 16, 16)
+    assert item0["t2"].shape == (4, 16, 16)
+    assert item0["target"].shape == (1, 16, 16)
+    assert item0["sar"].shape == (3, 16, 16)
+    assert item0["cloud_mask"].shape == (1, 16, 16)
+    assert isinstance(item0["t1"], torch.Tensor)
+
+    # Verify spatial block splitting directly on lazy dataset
+    splitter = SpatialBlockSplitter(
+        grid_size_deg=0.2, train_ratio=0.6, val_ratio=0.2, test_ratio=0.2, random_seed=42
+    )
+    train_idx, val_idx, test_idx = splitter.split(lazy_ds)
+    assert len(train_idx) > 0
+    assert len(val_idx) > 0
+    assert set(train_idx).isdisjoint(set(val_idx))
+
+    # Test DataLoader training with lazy dataset
+    train_loader = DataLoader(Subset(lazy_ds, train_idx), batch_size=2, shuffle=True)
+    val_loader = DataLoader(Subset(lazy_ds, val_idx), batch_size=2, shuffle=False)
+
+    model = SiameseChangeDetector(in_channels=4, features=[8, 16, 32, 64])
+    trainer = DeforestationTrainer(
+        model=model,
+        checkpoint_dir=str(tmp_path / "lazy_ckpt"),
+        model_type="siamese",
+    )
+    history = trainer.fit(train_loader, val_loader, epochs=1)
+    assert len(history) == 1
+    assert "val_iou" in history[0]

@@ -10,6 +10,7 @@ import sys
 import torch
 from torch.utils.data import DataLoader, Subset
 
+from pathlib import Path
 from geofm.models.siamese import SiameseChangeDetector
 from geofm.models.cross_attention import MultimodalFusionDeforestationNet
 from geofm.models.unet import UNet
@@ -18,10 +19,14 @@ from geofm.losses.focal_tversky import CompoundDeforestationLoss, FocalTverskyLo
 from geofm.losses.focal import BinaryFocalLoss
 from geofm.training.dataset import (
     GeospatialDeforestationDataset,
+    LazyGeospatialDataset,
     SpatialBlockSplitter,
 )
 from geofm.training.trainer import DeforestationTrainer
-from geofm.utils.synthetic_data import generate_synthetic_dataset
+from geofm.utils.synthetic_data import (
+    generate_synthetic_dataset,
+    stream_and_cache_synthetic_dataset,
+)
 
 
 def parse_args():
@@ -35,6 +40,10 @@ def parse_args():
     parser.add_argument("--loss", type=str, default="compound", choices=["compound", "focal_tversky", "focal"])
     parser.add_argument("--num-samples", type=int, default=16, help="Synthetic dataset size for training")
     parser.add_argument("--checkpoint-dir", type=str, default="./checkpoints", help="Output directory")
+    parser.add_argument("--data-dir", type=str, default=None, help="Directory containing cached .npz chips")
+    parser.add_argument("--cache-dir", type=str, default=None, help="Alias for --data-dir")
+    parser.add_argument("--force-generate", action="store_true", help="Force regenerate synthetic data")
+    parser.add_argument("--num-workers", type=int, default=0, help="DataLoader worker processes")
     return parser.parse_args()
 
 
@@ -50,18 +59,53 @@ def main():
     print(f"Learning Rate:      {args.lr}")
     print("-" * 65)
 
-    # 1. Dataset Generation & Spatial Block Cross-Validation Split
-    print("1. Generating geospatial tiles with geographic coordinates...")
-    samples = generate_synthetic_dataset(num_samples=args.num_samples, height=64, width=64)
-    splitter = SpatialBlockSplitter(grid_size_deg=0.1, train_ratio=0.7, val_ratio=0.3, test_ratio=0.0)
-    train_idx, val_idx, _ = splitter.split(samples)
+    # 1. Dataset Loading (Zero-RAM Lazy Loading)
+    cache_dir = args.data_dir or args.cache_dir or "./data/chips_cache"
+    manifest_file = os.path.join(cache_dir, "manifest.jsonl")
 
-    dataset = GeospatialDeforestationDataset(samples)
+    try:
+        import psutil
+        vm = psutil.virtual_memory()
+        print(f"System RAM: {vm.used / 1e9:.2f} GB used / {vm.total / 1e9:.2f} GB total ({vm.available / 1e9:.2f} GB available)")
+    except Exception:
+        pass
+
+    has_cache = os.path.exists(manifest_file) or (os.path.isdir(cache_dir) and any(Path(cache_dir).glob("*.npz")))
+    if has_cache and not args.force_generate:
+        print(f"1. Loading existing chip cache from {cache_dir} (Zero-RAM lazy streaming)...")
+        dataset = LazyGeospatialDataset(cache_dir=cache_dir)
+    else:
+        print(f"1. Generating {args.num_samples} chips via zero-RAM disk streaming...")
+        stream_and_cache_synthetic_dataset(
+            output_dir=cache_dir,
+            num_samples=args.num_samples,
+            height=64,
+            width=64,
+            show_progress=True,
+        )
+        dataset = LazyGeospatialDataset(cache_dir=cache_dir)
+
+    print(f"   Dataset size: {len(dataset)} chips indexed on disk.")
+    splitter = SpatialBlockSplitter(grid_size_deg=0.1, train_ratio=0.7, val_ratio=0.3, test_ratio=0.0)
+    train_idx, val_idx, _ = splitter.split(dataset)
+
     train_sub = Subset(dataset, train_idx)
     val_sub = Subset(dataset, val_idx)
 
-    train_loader = DataLoader(train_sub, batch_size=args.batch_size, shuffle=True)
-    val_loader = DataLoader(val_sub, batch_size=args.batch_size, shuffle=False)
+    train_loader = DataLoader(
+        train_sub,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=args.num_workers,
+        pin_memory=torch.cuda.is_available(),
+    )
+    val_loader = DataLoader(
+        val_sub,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=torch.cuda.is_available(),
+    )
 
     print(f"   Spatial split complete: {len(train_sub)} train samples, {len(val_sub)} val samples.")
 

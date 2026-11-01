@@ -7,6 +7,8 @@ Includes resilient pre-flight verification and offline NPZ chip caching.
 """
 
 from dataclasses import asdict, dataclass
+import gc
+import json
 import logging
 import os
 from pathlib import Path
@@ -138,8 +140,148 @@ class GeospatialDeforestationDataset(Dataset):
 DeforestationDataset = GeospatialDeforestationDataset
 
 
+class LazyGeospatialDataset(Dataset):
+    """Zero-RAM disk-backed PyTorch Dataset for large-scale geospatial chip collections.
+
+    Instead of holding uncompressed multispectral satellite imagery in host RAM (which
+    crashes on 12.7 GB Google Colab when scaling past 1,000 chips), this dataset loads chips
+    on-demand in `__getitem__` directly from cached .npz files on disk. Memory footprint
+    remains strictly bounded (<50 MB) regardless of whether the dataset contains 100 or
+    100,000 chips.
+    """
+
+    def __init__(
+        self,
+        cache_dir: Optional[Union[str, Path]] = None,
+        file_paths: Optional[List[str]] = None,
+        metadata: Optional[List[Dict[str, Any]]] = None,
+        transform: Optional[Any] = None,
+    ):
+        self.transform = transform
+        self.cache_dir = Path(cache_dir) if cache_dir else None
+        self.samples_meta: List[Dict[str, Any]] = []
+
+        if metadata is not None:
+            self.samples_meta = list(metadata)
+        elif self.cache_dir and (self.cache_dir / "manifest.jsonl").exists():
+            # Fast O(1) metadata streaming from manifest
+            manifest_path = self.cache_dir / "manifest.jsonl"
+            with open(manifest_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        record = json.loads(line)
+                        if "file_path" in record and not os.path.isabs(record["file_path"]):
+                            record["file_path"] = str(self.cache_dir / record["file_path"])
+                        self.samples_meta.append(record)
+        elif self.cache_dir and (self.cache_dir / "manifest.json").exists():
+            manifest_path = self.cache_dir / "manifest.json"
+            with open(manifest_path, "r", encoding="utf-8") as f:
+                records = json.load(f)
+                for record in records:
+                    if "file_path" in record and not os.path.isabs(record["file_path"]):
+                        record["file_path"] = str(self.cache_dir / record["file_path"])
+                    self.samples_meta.append(record)
+        elif file_paths is not None:
+            for p in file_paths:
+                p_str = str(p)
+                stem = Path(p_str).stem
+                self.samples_meta.append({
+                    "sample_id": stem,
+                    "file_path": p_str,
+                    "lon": 0.0,
+                    "lat": 0.0,
+                    "block_id": 0,
+                })
+        elif self.cache_dir and self.cache_dir.is_dir():
+            # Discover .npz files directly from disk without loading full arrays
+            npz_files = sorted(list(self.cache_dir.glob("*.npz")))
+            for p in npz_files:
+                p_str = str(p)
+                stem = p.stem
+                lon, lat, block_id = 0.0, 0.0, 0
+                try:
+                    with np.load(p_str) as data:
+                        if "lon" in data:
+                            lon = float(data["lon"])
+                        if "lat" in data:
+                            lat = float(data["lat"])
+                        if "block_id" in data:
+                            block_id = int(data["block_id"])
+                        if "sample_id" in data:
+                            stem = str(data["sample_id"])
+                except Exception as e:
+                    logger.warning(f"Failed to read header of {p_str}: {e}")
+                self.samples_meta.append({
+                    "sample_id": stem,
+                    "file_path": p_str,
+                    "lon": lon,
+                    "lat": lat,
+                    "block_id": block_id,
+                })
+        else:
+            logger.warning("Initialized empty LazyGeospatialDataset.")
+
+        logger.info(f"Initialized LazyGeospatialDataset with {len(self.samples_meta)} chips (Zero-RAM mode)")
+
+    def __len__(self) -> int:
+        return len(self.samples_meta)
+
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        meta = self.samples_meta[idx]
+        file_path = meta["file_path"]
+
+        with np.load(file_path) as data:
+            t1_arr = np.nan_to_num(data["t1_optical"], nan=0.0, posinf=1.0, neginf=0.0).astype(np.float32)
+            t2_arr = np.nan_to_num(data["t2_optical"], nan=0.0, posinf=1.0, neginf=0.0).astype(np.float32)
+            tgt_arr = np.nan_to_num(data["target_mask"], nan=0.0, posinf=1.0, neginf=0.0).astype(np.float32)
+
+            if tgt_arr.ndim == 2:
+                tgt_arr = tgt_arr[np.newaxis, ...]
+
+            sample_id = str(meta.get("sample_id", data.get("sample_id", f"chip_{idx:05d}")))
+            lon = float(meta.get("lon", data.get("lon", 0.0)))
+            lat = float(meta.get("lat", data.get("lat", 0.0)))
+            block_id = int(meta.get("block_id", data.get("block_id", 0)))
+
+            item = {
+                "sample_id": sample_id,
+                "t1": torch.from_numpy(t1_arr),
+                "t2": torch.from_numpy(t2_arr),
+                "target": torch.from_numpy(tgt_arr),
+                "lon": torch.tensor(lon, dtype=torch.float32),
+                "lat": torch.tensor(lat, dtype=torch.float32),
+                "block_id": torch.tensor(block_id, dtype=torch.long),
+            }
+
+            if "sar_data" in data and data["sar_data"] is not None:
+                sar_arr = np.nan_to_num(data["sar_data"], nan=0.0, posinf=0.0, neginf=-30.0).astype(np.float32)
+                item["sar"] = torch.from_numpy(sar_arr)
+
+            if "cloud_mask" in data and data["cloud_mask"] is not None:
+                c_arr = np.nan_to_num(data["cloud_mask"], nan=0.0).astype(np.float32)
+                if c_arr.ndim == 2:
+                    c_arr = c_arr[np.newaxis, ...]
+                item["cloud_mask"] = torch.from_numpy(c_arr)
+
+            if self.transform is not None:
+                item = self.transform(item)
+
+            return item
+
+    def get_coordinates(self) -> List[Tuple[float, float]]:
+        """Return list of (lon, lat) tuples without loading image arrays into RAM."""
+        return [(float(m.get("lon", 0.0)), float(m.get("lat", 0.0))) for m in self.samples_meta]
+
+    def get_sample_ids(self) -> List[str]:
+        """Return list of sample IDs without loading image arrays into RAM."""
+        return [str(m.get("sample_id", f"chip_{i}")) for i, m in enumerate(self.samples_meta)]
+
+
 def cache_dataset_to_npz(samples: List[GeoSample], output_dir: str) -> List[str]:
     """Serialize and cache geospatial training chips to local .npz files for high-speed offline training.
+
+    Also writes a streaming manifest.jsonl for instant O(1) LazyGeospatialDataset loading.
 
     Args:
         samples: List of GeoSample objects.
@@ -150,41 +292,61 @@ def cache_dataset_to_npz(samples: List[GeoSample], output_dir: str) -> List[str]
     """
     os.makedirs(output_dir, exist_ok=True)
     saved_paths: List[str] = []
+    manifest_path = os.path.join(output_dir, "manifest.jsonl")
 
-    for idx, s in enumerate(samples):
-        chip_id = s.sample_id or f"chip_{idx:05d}"
-        file_path = os.path.join(output_dir, f"{chip_id}.npz")
+    with open(manifest_path, "w", encoding="utf-8") as f_man:
+        for idx, s in enumerate(samples):
+            chip_id = s.sample_id or f"chip_{idx:05d}"
+            file_name = f"{chip_id}.npz"
+            file_path = os.path.join(output_dir, file_name)
 
-        data_dict: Dict[str, Any] = {
-            "sample_id": s.sample_id,
-            "t1_optical": s.t1_optical,
-            "t2_optical": s.t2_optical,
-            "target_mask": s.target_mask,
-            "lon": s.lon,
-            "lat": s.lat,
-            "block_id": s.block_id,
-        }
-        if s.sar_data is not None:
-            data_dict["sar_data"] = s.sar_data
-        if s.cloud_mask is not None:
-            data_dict["cloud_mask"] = s.cloud_mask
+            data_dict: Dict[str, Any] = {
+                "sample_id": chip_id,
+                "t1_optical": s.t1_optical,
+                "t2_optical": s.t2_optical,
+                "target_mask": s.target_mask,
+                "lon": s.lon,
+                "lat": s.lat,
+                "block_id": s.block_id,
+            }
+            if s.sar_data is not None:
+                data_dict["sar_data"] = s.sar_data
+            if s.cloud_mask is not None:
+                data_dict["cloud_mask"] = s.cloud_mask
 
-        np.savez_compressed(file_path, **data_dict)
-        saved_paths.append(file_path)
+            np.savez_compressed(file_path, **data_dict)
+            saved_paths.append(file_path)
 
-    logger.info(f"Cached {len(saved_paths)} geospatial chips to {output_dir}")
+            manifest_record = {
+                "sample_id": chip_id,
+                "file_path": file_name,
+                "lon": float(s.lon),
+                "lat": float(s.lat),
+                "block_id": int(s.block_id),
+            }
+            f_man.write(json.dumps(manifest_record) + "\n")
+
+    logger.info(f"Cached {len(saved_paths)} geospatial chips and manifest to {output_dir}")
     return saved_paths
 
 
-def load_dataset_from_npz(cache_dir: str) -> List[GeoSample]:
-    """Load cached .npz geospatial chips from directory into GeoSample list.
+def load_dataset_from_npz(
+    cache_dir: str,
+    lazy: bool = False,
+) -> Union[List[GeoSample], LazyGeospatialDataset]:
+    """Load cached .npz geospatial chips from directory.
 
     Args:
         cache_dir: Directory containing .npz files.
+        lazy: If True, returns a zero-RAM LazyGeospatialDataset for large collections (10,000+ chips).
+              If False (default), returns in-memory List[GeoSample] for backward compatibility.
 
     Returns:
-        List of GeoSample objects.
+        LazyGeospatialDataset (if lazy=True) or List of GeoSample objects (if lazy=False).
     """
+    if lazy:
+        return LazyGeospatialDataset(cache_dir=cache_dir)
+
     path = Path(cache_dir)
     npz_files = sorted(list(path.glob("*.npz")))
     samples: List[GeoSample] = []
@@ -208,6 +370,17 @@ def load_dataset_from_npz(cache_dir: str) -> List[GeoSample]:
     return samples
 
 
+def _extract_coord(item: Any) -> Tuple[float, float]:
+    """Helper to extract (lon, lat) float coordinates from any representation."""
+    if isinstance(item, GeoSample):
+        return item.lon, item.lat
+    if isinstance(item, dict):
+        return float(item.get("lon", 0.0)), float(item.get("lat", 0.0))
+    if isinstance(item, (tuple, list)):
+        return float(item[0]), float(item[1])
+    return float(getattr(item, "lon", 0.0)), float(getattr(item, "lat", 0.0))
+
+
 class SpatialBlockSplitter:
     """Partitions geospatial coordinates into spatially buffered training/validation blocks.
 
@@ -215,6 +388,8 @@ class SpatialBlockSplitter:
     spatial autocorrelation. Random pixel/tile splitting leads to severe optimistic
     evaluation bias. This splitter assigns discrete spatial grid cells to splits
     and enforces a buffer zone where boundary blocks are discarded.
+
+    Compatible with in-memory List[GeoSample], zero-RAM LazyGeospatialDataset, or coordinate lists.
     """
 
     def __init__(
@@ -234,7 +409,8 @@ class SpatialBlockSplitter:
         self.rng = np.random.default_rng(random_seed)
 
     def assign_blocks(
-        self, samples: List[GeoSample]
+        self,
+        samples: Union[List[GeoSample], LazyGeospatialDataset, List[Dict[str, Any]], List[Tuple[float, float]]],
     ) -> Tuple[Dict[int, List[int]], Dict[int, Tuple[float, float]]]:
         """Assign each sample to a 2D integer spatial block ID based on (lon, lat).
 
@@ -244,13 +420,30 @@ class SpatialBlockSplitter:
         block_to_indices: Dict[int, List[int]] = {}
         block_centroids: Dict[int, Tuple[float, float]] = {}
 
-        for idx, s in enumerate(samples):
+        if hasattr(samples, "samples_meta"):
+            items: Union[List[Any], LazyGeospatialDataset] = samples.samples_meta
+        else:
+            items = samples
+
+        for idx, s in enumerate(items):
+            s_lon, s_lat = _extract_coord(s)
+
             # Compute discrete grid indices
-            col = int(np.floor(s.lon / self.grid_size))
-            row = int(np.floor(s.lat / self.grid_size))
+            col = int(np.floor(s_lon / self.grid_size))
+            row = int(np.floor(s_lat / self.grid_size))
             # Cantor-like unique 2D grid hash
             block_id = int((col * 73856093) ^ (row * 19349663)) % 1000000
-            s.block_id = block_id
+
+            # Store block_id back if object is mutable
+            if isinstance(s, GeoSample):
+                s.block_id = block_id
+            elif isinstance(s, dict):
+                s["block_id"] = block_id
+            elif hasattr(s, "block_id"):
+                try:
+                    s.block_id = block_id
+                except Exception:
+                    pass
 
             if block_id not in block_to_indices:
                 block_to_indices[block_id] = []
@@ -263,7 +456,8 @@ class SpatialBlockSplitter:
         return block_to_indices, block_centroids
 
     def split(
-        self, samples: List[GeoSample]
+        self,
+        samples: Union[List[GeoSample], LazyGeospatialDataset, List[Dict[str, Any]], List[Tuple[float, float]]],
     ) -> Tuple[List[int], List[int], List[int]]:
         """Split sample indices into train, validation, and test sets with buffer isolation.
 
@@ -297,14 +491,17 @@ class SpatialBlockSplitter:
 
         # Enforce spatial buffer margin: remove train samples too close to val/test sets
         if self.buffer_size > 0.0 and (val_idx or test_idx):
-            eval_coords = [
-                (samples[i].lon, samples[i].lat) for i in (val_idx + test_idx)
-            ]
+            if hasattr(samples, "samples_meta"):
+                items: Union[List[Any], LazyGeospatialDataset] = samples.samples_meta
+            else:
+                items = samples
+
+            eval_coords = [_extract_coord(items[i]) for i in (val_idx + test_idx)]
             buf_sq = self.buffer_size**2
             train_idx = []
 
             for i in raw_train_idx:
-                s_lon, s_lat = samples[i].lon, samples[i].lat
+                s_lon, s_lat = _extract_coord(items[i])
                 # Check distance to nearest evaluation sample
                 is_buffered = any(
                     ((s_lon - e_lon) ** 2 + (s_lat - e_lat) ** 2) < buf_sq

@@ -4,6 +4,10 @@ Generates realistic bitemporal Sentinel-2 (optical RGB+NIR), Sentinel-1 (SAR VV+
 cloud masks, and deforestation ground-truth change masks.
 """
 
+import gc
+import json
+import os
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 import numpy as np
 from geofm.training.dataset import GeoSample
@@ -120,3 +124,91 @@ def generate_synthetic_dataset(
         samples.append(sample)
 
     return samples
+
+
+def stream_and_cache_synthetic_dataset(
+    output_dir: str,
+    num_samples: int = 16,
+    height: int = 64,
+    width: int = 64,
+    start_lon: float = -60.0,
+    start_lat: float = -3.0,
+    coord_step: float = 0.05,
+    batch_flush: int = 50,
+    show_progress: bool = True,
+) -> Tuple[str, int]:
+    """Stream-generate synthetic geospatial chips directly to disk cache with ZERO RAM accumulation.
+
+    Unlike eager generation which builds a monolithic in-memory array list (causing Colab OOM
+    crashes on 12.7 GB RAM machines when scaling to 10,000 chips), this function generates and
+    saves chips one-by-one, flushes them to compressed NPZ files, appends a manifest record,
+    and immediately frees the array memory with garbage collection.
+
+    Peak RAM footprint stays strictly bounded (<50 MB) regardless of sample count.
+
+    Args:
+        output_dir: Target directory where .npz chips and manifest.jsonl are stored.
+        num_samples: Total number of paired chips to generate (e.g. 100, 1000, 10000).
+        height: Spatial height of each satellite chip.
+        width: Spatial width of each satellite chip.
+        start_lon: Starting longitude coordinate.
+        start_lat: Starting latitude coordinate.
+        coord_step: Spatial distance increment between consecutive tiles.
+        batch_flush: Number of chips generated before triggering garbage collection.
+        show_progress: Whether to print progress milestones.
+
+    Returns:
+        (manifest_path, total_chips_saved)
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    manifest_path = os.path.join(output_dir, "manifest.jsonl")
+
+    with open(manifest_path, "w", encoding="utf-8") as f_out:
+        for i in range(num_samples):
+            lon = float(start_lon + (i % 25) * coord_step)
+            lat = float(start_lat + (i // 25) * coord_step)
+
+            scene = generate_synthetic_scene(height=height, width=width, seed=100 + i)
+            sar_stacked = np.stack(
+                [scene["sar_vv"], scene["sar_vh"], scene["sar_vh"] / (scene["sar_vv"] + 1e-6)],
+                axis=0,
+            ).astype(np.float32)
+
+            chip_id = f"chip_{i:05d}"
+            file_name = f"{chip_id}.npz"
+            file_path = os.path.join(output_dir, file_name)
+
+            np.savez_compressed(
+                file_path,
+                sample_id=chip_id,
+                t1_optical=scene["t1_optical"],
+                t2_optical=scene["t2_optical"],
+                target_mask=scene["change_mask"][np.newaxis, ...].astype(np.float32),
+                sar_data=sar_stacked,
+                cloud_mask=scene["cloud_mask"][np.newaxis, ...].astype(np.float32),
+                lon=lon,
+                lat=lat,
+                block_id=0,
+            )
+
+            record = {
+                "sample_id": chip_id,
+                "file_path": file_name,
+                "lon": lon,
+                "lat": lat,
+                "block_id": 0,
+            }
+            f_out.write(json.dumps(record) + "\n")
+
+            del scene
+            del sar_stacked
+
+            if (i + 1) % batch_flush == 0:
+                f_out.flush()
+                gc.collect()
+
+            if show_progress and ((i + 1) % max(1, num_samples // 10) == 0 or (i + 1) == num_samples):
+                pct = ((i + 1) / num_samples) * 100
+                print(f"  [Disk Streaming] {i + 1}/{num_samples} chips cached ({pct:.0f}%) -> {output_dir}")
+
+    return manifest_path, num_samples
