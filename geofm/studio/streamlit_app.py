@@ -284,20 +284,64 @@ def run_streamlit_app():
             layers = infer_result["layers"]
             with img_col1:
                 st.image(layers["t1_rgb"], caption="Baseline T1 (Sentinel-2 RGB)", use_container_width=True)
-                st.image(layers["ndvi_t1"], caption="Baseline T1 NDVI", use_container_width=True)
+                st.image(layers["t1_cir"], caption="Baseline T1 CIR (Color Infrared)", use_container_width=True)
 
             with img_col2:
-                st.image(layers["t2_rgb"], caption="Disturbed T2 (Sentinel-2 RGB)", use_container_width=True)
+                st.image(layers["ndvi_t1"], caption="Baseline T1 NDVI", use_container_width=True)
                 st.image(layers["ndvi_t2"], caption="Disturbed T2 NDVI", use_container_width=True)
 
             with img_col3:
+                st.image(layers["t2_rgb"], caption="Disturbed T2 (Sentinel-2 RGB)", use_container_width=True)
                 st.image(layers["t2_cir"], caption="T2 Color Infrared (CIR B8-B4-B3)", use_container_width=True)
-                st.image(layers["sar_composite"], caption="Sentinel-1 SAR False Color", use_container_width=True)
 
             with img_col4:
+                st.image(layers["sar_composite"], caption="Sentinel-1 SAR False Color", use_container_width=True)
                 st.image(layers["probability_heatmap"], caption="Deforestation Heatmap", use_container_width=True)
-                st.write("**Severity Summary:**")
-                st.write(infer_result["severity_counts"])
+
+            # Interactive Leaflet Map for Alert Polygons
+            st.subheader("Interactive Deforestation Alert Map")
+            try:
+                import streamlit.components.v1 as components
+                geojson_str = json.dumps(infer_result["geojson"])
+                map_html = f"""
+                <!DOCTYPE html>
+                <html>
+                <head>
+                  <meta charset="utf-8">
+                  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+                  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+                  <style>body {{ margin:0; padding:0; }} #map {{ height:400px; width:100%; border-radius:8px; border:1px solid #dee2e6; }}</style>
+                </head>
+                <body>
+                  <div id="map"></div>
+                  <script>
+                    const map = L.map('map').setView([-3.05, -60.05], 11);
+                    L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
+                      maxZoom: 18,
+                      attribution: '© OpenStreetMap | GeoFM Sentinel Alerts'
+                    }}).addTo(map);
+                    const geojson = {geojson_str};
+                    const layer = L.geoJSON(geojson, {{
+                      style: function(feat) {{
+                        const lvl = feat.properties.alert_level;
+                        const c = lvl === 'CRITICAL' ? '#d90429' : lvl === 'HIGH' ? '#f77f00' : '#fcbf49';
+                        return {{ color: c, weight: 2, fillColor: c, fillOpacity: 0.5 }};
+                      }},
+                      onEachFeature: function(feat, lyr) {{
+                        const p = feat.properties;
+                        lyr.bindPopup('<b>Alert ' + p.cluster_id + '</b><br>Severity: <b>' + p.alert_level + '</b><br>Area: ' + p.area_ha + ' ha');
+                      }}
+                    }}).addTo(map);
+                    if (geojson.features && geojson.features.length > 0 && layer.getBounds().isValid()) {{
+                      map.fitBounds(layer.getBounds(), {{ padding: [20, 20] }});
+                    }}
+                  </script>
+                </body>
+                </html>
+                """
+                components.html(map_html, height=420)
+            except Exception:
+                pass
 
             # Alert Polygons & GeoJSON Inspection
             st.subheader("Vector Alert Polygons (GeoJSON)")
@@ -355,12 +399,29 @@ def run_streamlit_app():
                 "Plot Geometries (JSON)",
                 value=json.dumps(selected_scenario["plots"], indent=2),
                 height=180,
+                key=f"plots_json_{selected_scenario_name}",
             )
 
+            col_al_hdr, col_al_btn = st.columns([1, 1])
+            with col_al_hdr:
+                st.caption("Active Deforestation Alerts (JSON)")
+            with col_al_btn:
+                if "last_infer_result" in st.session_state and st.session_state.last_infer_result:
+                    if st.button("⚡ Import Tab 2 AI Alerts", key="btn_import_alerts"):
+                        st.session_state[f"alerts_json_{selected_scenario_name}"] = json.dumps(
+                            st.session_state.last_infer_result["geojson"], indent=2
+                        )
+
+            default_alerts_val = st.session_state.get(
+                f"alerts_json_{selected_scenario_name}",
+                json.dumps(selected_scenario["alerts"], indent=2),
+            )
             alerts_json_str = st.text_area(
                 "Active Deforestation Alerts (JSON)",
-                value=json.dumps(selected_scenario["alerts"], indent=2),
+                value=default_alerts_val,
                 height=140,
+                key=f"alerts_json_widget_{selected_scenario_name}",
+                label_visibility="collapsed",
             )
 
             if audit_btn:
@@ -469,7 +530,11 @@ def run_streamlit_app():
             else:
                 bbox_val = [-60.5, -3.5, -59.5, -2.5]
 
-            bbox_str = st.text_input("Bounding Box [min_lon, min_lat, max_lon, max_lat]", value=str(bbox_val))
+            bbox_str = st.text_input(
+                "Bounding Box [min_lon, min_lat, max_lon, max_lat]",
+                value=str(bbox_val),
+                key=f"bbox_str_{region_preset}",
+            )
             platform_filter = st.selectbox("Platform Filter", options=["All", "sentinel-2", "sentinel-1"])
             max_cloud = st.slider("Max Cloud Cover (%)", min_value=0, max_value=100, value=25)
 

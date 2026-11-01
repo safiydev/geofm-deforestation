@@ -446,6 +446,7 @@ STUDIO_HTML = """<!DOCTYPE html>
             <h3 class="card-title" style="margin-top:1.5rem;">Deforestation Alerts for Intersection (JSON)</h3>
             <div class="form-group">
               <textarea id="eudrAlertsJson" rows="4"></textarea>
+              <button class="btn btn-secondary" type="button" onclick="importLatestAlertsToEudr()" style="margin-top:0.5rem; font-size:0.8rem; padding:0.4rem 0.8rem; width:auto;">⚡ Import AI Alerts from Tab 2 Inference</button>
             </div>
           </div>
 
@@ -524,7 +525,12 @@ STUDIO_HTML = """<!DOCTYPE html>
       el.classList.add('active');
       document.getElementById(tabId).classList.add('active');
       if (tabId === 'tab2' && map) {
-        setTimeout(() => { map.invalidateSize(); }, 200);
+        setTimeout(() => {
+          map.invalidateSize();
+          if (alertGeoJsonLayer && alertGeoJsonLayer.getBounds && alertGeoJsonLayer.getBounds().isValid()) {
+            map.fitBounds(alertGeoJsonLayer.getBounds(), { padding: [20, 20] });
+          }
+        }, 200);
       }
     }
 
@@ -708,13 +714,15 @@ STUDIO_HTML = """<!DOCTYPE html>
 
         // Layers
         const layers = data.layers;
+        window.latestInferenceGeoJson = data.geojson;
         const grid = document.getElementById('layerGrid');
         grid.innerHTML = `
           <div class="image-card"><img src="${layers.t1_rgb}"><div class="caption">Baseline T1 (True Color RGB)</div></div>
+          <div class="image-card"><img src="${layers.t1_cir}"><div class="caption">Baseline T1 CIR (Color Infrared)</div></div>
           <div class="image-card"><img src="${layers.ndvi_t1}"><div class="caption">Baseline T1 NDVI (Vegetation)</div></div>
           <div class="image-card"><img src="${layers.t2_rgb}"><div class="caption">Disturbed T2 (True Color RGB)</div></div>
-          <div class="image-card"><img src="${layers.ndvi_t2}"><div class="caption">Disturbed T2 NDVI (Disturbance)</div></div>
           <div class="image-card"><img src="${layers.t2_cir}"><div class="caption">T2 Color Infrared (CIR B8-B4-B3)</div></div>
+          <div class="image-card"><img src="${layers.ndvi_t2}"><div class="caption">Disturbed T2 NDVI (Disturbance)</div></div>
           <div class="image-card"><img src="${layers.sar_composite}"><div class="caption">Sentinel-1 SAR False Color</div></div>
           <div class="image-card"><img src="${layers.probability_heatmap}"><div class="caption">Deforestation Probability Map</div></div>
         `;
@@ -737,7 +745,7 @@ STUDIO_HTML = """<!DOCTYPE html>
           }
         }).addTo(map);
 
-        if (geojson.features && geojson.features.length > 0) {
+        if (geojson.features && geojson.features.length > 0 && alertGeoJsonLayer.getBounds && alertGeoJsonLayer.getBounds().isValid() && map.getSize().x > 0) {
           map.fitBounds(alertGeoJsonLayer.getBounds(), { padding: [20, 20] });
         }
 
@@ -752,6 +760,14 @@ STUDIO_HTML = """<!DOCTYPE html>
         }
       } catch (err) {
         alert('Inference failed: ' + err);
+      }
+    }
+
+    function importLatestAlertsToEudr() {
+      if (window.latestInferenceGeoJson) {
+        document.getElementById('eudrAlertsJson').value = JSON.stringify(window.latestInferenceGeoJson, null, 2);
+      } else {
+        alert('No inference alerts available yet. Run satellite inference in Tab 2 first.');
       }
     }
 

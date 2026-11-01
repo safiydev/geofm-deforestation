@@ -33,6 +33,7 @@ class DeforestationTrainer:
         scheduler: Optional[any] = None,
         device: Optional[Union[str, torch.device]] = None,
         checkpoint_dir: str = "./checkpoints",
+        learning_rate: float = 1e-3,
         gradient_clip_norm: float = 1.0,
         early_stopping_patience: int = 10,
         model_type: str = "siamese",  # 'siamese', 'multimodal', or 'unet'
@@ -48,6 +49,7 @@ class DeforestationTrainer:
 
         self.model = model.to(self.device)
         self.model_type = model_type
+        self.learning_rate = float(learning_rate)
         self.criterion = (
             criterion if criterion is not None else CompoundDeforestationLoss()
         )
@@ -56,7 +58,7 @@ class DeforestationTrainer:
             if optimizer is not None
             else torch.optim.AdamW(
                 [p for p in self.model.parameters() if p.requires_grad],
-                lr=1e-3,
+                lr=self.learning_rate,
                 weight_decay=1e-4,
             )
         )
@@ -161,6 +163,7 @@ class DeforestationTrainer:
     ) -> List[Dict[str, Any]]:
         """Execute full training and validation lifecycle."""
         print(f"Starting training on device: {self.device} for {epochs} epochs.")
+        epoch = 0
 
         for epoch in range(1, epochs + 1):
             train_loss = self.train_epoch(train_loader)
@@ -253,17 +256,20 @@ class DeforestationTrainer:
 
         # Save last checkpoint
         last_path = os.path.join(self.checkpoint_dir, "last_model.pt")
+        latest_metrics_dict = self.history[-1] if self.history else {}
         torch.save(
             {
                 "epoch": epoch,
                 "model_state_dict": self.model.state_dict(),
+                "metrics": latest_metrics_dict,
                 "history": self.history,
             },
             last_path,
         )
 
-        # Export metrics JSON
+        # Export metrics JSON & CSV
         self.export_metrics_json()
+        self.export_metrics_csv()
 
         return self.history
 
@@ -292,6 +298,61 @@ class DeforestationTrainer:
         try:
             with open(latest_path, "w", encoding="utf-8") as f:
                 json.dump(payload, f, indent=2)
+        except OSError:
+            pass
+
+        return out_path
+
+    def export_metrics_csv(self, filepath: Optional[str] = None) -> str:
+        """Export epoch history to a CSV file for file-based tracking."""
+        out_path = filepath or os.path.join(self.log_dir, f"{self.experiment_name}_metrics.csv")
+        os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
+
+        header = [
+            "epoch",
+            "train_loss",
+            "val_loss",
+            "val_iou",
+            "val_f1",
+            "val_recall",
+            "val_precision",
+            "val_specificity",
+            "val_accuracy",
+            "lr",
+            "tp",
+            "fp",
+            "fn",
+            "tn",
+        ]
+        lines = [",".join(header)]
+
+        for h in self.history:
+            cm = h.get("confusion_matrix", {})
+            row = [
+                str(h.get("epoch", "")),
+                str(h.get("train_loss", "")),
+                str(h.get("val_loss", "")),
+                str(h.get("val_iou", "")),
+                str(h.get("val_f1", "")),
+                str(h.get("val_recall", "")),
+                str(h.get("val_precision", "")),
+                str(h.get("val_specificity", "")),
+                str(h.get("val_accuracy", "")),
+                str(h.get("lr", "")),
+                str(cm.get("tp", 0)),
+                str(cm.get("fp", 0)),
+                str(cm.get("fn", 0)),
+                str(cm.get("tn", 0)),
+            ]
+            lines.append(",".join(row))
+
+        with open(out_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+
+        latest_csv = os.path.join(self.checkpoint_dir, "latest_metrics.csv")
+        try:
+            with open(latest_csv, "w", encoding="utf-8") as f:
+                f.write("\n".join(lines) + "\n")
         except OSError:
             pass
 
@@ -336,11 +397,11 @@ class DeforestationTrainer:
         }
 
     def export_tensorboard(self, output_dir: Optional[str] = None) -> Optional[str]:
-        """Flush and return TensorBoard event log directory if active."""
+        """Flush and return TensorBoard event log directory if active, or file log_dir."""
         if self.writer is not None:
             self.writer.flush()
             return getattr(self.writer, "log_dir", self.log_dir)
-        return None
+        return self.log_dir
 
     def close(self) -> None:
         """Safely close TensorBoard writer and flush buffers."""

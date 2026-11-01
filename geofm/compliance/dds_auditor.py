@@ -96,16 +96,47 @@ class DDSAuditor:
         has_invalid = False
         has_violations = False
 
+        # Normalize plots collection
+        if isinstance(plots, dict) and plots.get("type") == "FeatureCollection":
+            normalized_plots = plots.get("features", [])
+        elif isinstance(plots, dict):
+            normalized_plots = [plots]
+        elif isinstance(plots, list):
+            normalized_plots = plots
+        else:
+            normalized_plots = []
+
+        # Normalize deforestation alerts collection
+        if isinstance(deforestation_alerts, dict) and deforestation_alerts.get("type") == "FeatureCollection":
+            normalized_alerts = deforestation_alerts.get("features", [])
+        elif isinstance(deforestation_alerts, dict):
+            normalized_alerts = [deforestation_alerts]
+        elif isinstance(deforestation_alerts, list):
+            normalized_alerts = deforestation_alerts
+        else:
+            normalized_alerts = []
+
         # Validate commodity against EUDR Annex I scope
         comm_valid, comm_msg = self.validator.validate_commodity(commodity_clean)
         if not comm_valid:
             has_invalid = True
 
-        for plot in plots:
-            p_id = plot.get("plot_id", "unknown-plot")
-            g_type = plot.get("geometry_type", "polygon")
-            coords = plot.get("coordinates", [])
-            dec_area = plot.get("declared_area_ha")
+        for idx, plot in enumerate(normalized_plots):
+            # Support both flat dicts and GeoJSON Feature objects
+            if isinstance(plot, dict) and (plot.get("type") == "Feature" or "geometry" in plot):
+                geom = plot.get("geometry", {})
+                props = plot.get("properties", {}) or {}
+                p_id = plot.get("id") or props.get("plot_id") or plot.get("plot_id", f"plot-{idx+1:03d}")
+                g_type = geom.get("type") or plot.get("geometry_type", "polygon")
+                coords = geom.get("coordinates") if "coordinates" in geom else plot.get("coordinates", [])
+                dec_area = props.get("declared_area_ha") or plot.get("declared_area_ha")
+            elif isinstance(plot, dict):
+                p_id = plot.get("plot_id", f"plot-{idx+1:03d}")
+                g_type = plot.get("geometry_type", "polygon")
+                coords = plot.get("coordinates", [])
+                dec_area = plot.get("declared_area_ha")
+            else:
+                continue
 
             # 1. Validate geometry rules
             is_valid, v_msg, calc_area = self.validator.validate_plot_geometry(
@@ -143,8 +174,11 @@ class DDSAuditor:
 
             overlaps = []
 
-            for alert in deforestation_alerts:
-                alert_geom = alert.get("geometry", {})
+            for a_idx, alert in enumerate(normalized_alerts):
+                if not isinstance(alert, dict):
+                    continue
+
+                alert_geom = alert.get("geometry", {}) if isinstance(alert.get("geometry"), dict) else alert
                 alert_type = alert_geom.get("type", "Polygon")
                 alert_rings = []
 
@@ -173,8 +207,21 @@ class DDSAuditor:
                             break
 
                 if intersected:
+                    # Resolve alert identifier and attributes
+                    props = alert.get("properties", {}) or {}
+                    alert_id = (
+                        alert.get("alert_id")
+                        or alert.get("id")
+                        or props.get("cluster_id")
+                        or f"alert-{a_idx+1:03d}"
+                    )
+                    alert_area = (
+                        alert.get("area_ha")
+                        or props.get("area_ha", 0.0)
+                    )
+
                     # Parse detection date
-                    dt_raw = alert.get("detection_date")
+                    dt_raw = alert.get("detection_date") or props.get("detection_date")
                     if isinstance(dt_raw, str):
                         try:
                             det_dt = datetime.fromisoformat(dt_raw)
@@ -187,9 +234,9 @@ class DDSAuditor:
 
                     is_violation, timing_msg = self.validator.verify_deforestation_timing(det_dt)
                     overlap_info = {
-                        "alert_id": alert.get("alert_id"),
+                        "alert_id": alert_id,
                         "detection_date": det_dt.isoformat(),
-                        "alert_area_ha": alert.get("area_ha", 0.0),
+                        "alert_area_ha": round(float(alert_area), 3),
                         "violates_cutoff": is_violation,
                         "details": timing_msg,
                     }
@@ -197,7 +244,7 @@ class DDSAuditor:
 
                     if is_violation:
                         plot_violations.append(
-                            f"Post-2020 Deforestation Alert [{alert.get('alert_id')}] detected on plot: {timing_msg}"
+                            f"Post-2020 Deforestation Alert [{alert_id}] detected on plot: {timing_msg}"
                         )
 
             if plot_violations:

@@ -227,6 +227,7 @@ class StudioTrainingManager:
         trainer = DeforestationTrainer(
             model=model,
             criterion=criterion,
+            learning_rate=learning_rate,
             checkpoint_dir=self.checkpoint_dir,
             model_type=model_type_str,
             epoch_callback=_epoch_hook,
@@ -714,7 +715,11 @@ class CheckpointManager:
                         info["epoch"] = chk.get("epoch", "N/A")
                         metrics = chk.get("metrics", {})
                         if isinstance(metrics, dict):
-                            info["best_val_iou"] = metrics.get("iou", "N/A")
+                            val_iou = metrics.get("iou", metrics.get("val_iou"))
+                            if val_iou is not None:
+                                info["best_val_iou"] = val_iou
+                        if info["best_val_iou"] == "N/A" and isinstance(chk.get("history"), list) and chk["history"]:
+                            info["best_val_iou"] = chk["history"][-1].get("val_iou", "N/A")
                 except Exception:
                     pass
                 results.append(info)

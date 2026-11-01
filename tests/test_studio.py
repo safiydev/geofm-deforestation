@@ -317,3 +317,166 @@ def test_web_studio_api_train():
     assert data["architecture"] == "siamese"
     assert len(data["history"]) == 1
     assert "val_iou" in data["history"][0]
+
+
+def test_web_studio_api_train_status():
+    resp = client.get("/studio/api/train/status")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "is_training" in data
+    assert "latest_run" in data
+    assert "history" in data
+
+
+def test_trainer_learning_rate_and_csv_export(tmp_path):
+    samples = generate_synthetic_dataset(num_samples=4, height=32, width=32)
+    dataset = GeospatialDeforestationDataset(samples)
+    loader = DataLoader(dataset, batch_size=2)
+    model = SiameseChangeDetector(in_channels=4, features=[8, 16, 32, 64])
+
+    custom_lr = 0.0035
+    trainer = DeforestationTrainer(
+        model=model,
+        learning_rate=custom_lr,
+        checkpoint_dir=str(tmp_path / "chk"),
+        log_dir=str(tmp_path / "logs"),
+        experiment_name="test_lr_csv",
+    )
+
+    # Check optimizer got configured LR
+    assert abs(trainer.optimizer.param_groups[0]["lr"] - custom_lr) < 1e-6
+
+    history = trainer.fit(loader, loader, epochs=1)
+    assert len(history) == 1
+    assert abs(history[0]["lr"] - custom_lr) < 1e-6
+
+    # Verify CSV export
+    csv_file = tmp_path / "logs" / "test_lr_csv_metrics.csv"
+    assert csv_file.exists()
+    content = csv_file.read_text(encoding="utf-8")
+    assert "epoch,train_loss,val_loss,val_iou" in content
+    assert str(custom_lr) in content
+
+    # Verify TensorBoard export directory returns path
+    tb_dir = trainer.export_tensorboard()
+    assert tb_dir is not None
+    assert str(tmp_path / "logs") in tb_dir
+
+
+def test_trainer_fit_zero_epochs(tmp_path):
+    samples = generate_synthetic_dataset(num_samples=2, height=32, width=32)
+    dataset = GeospatialDeforestationDataset(samples)
+    loader = DataLoader(dataset, batch_size=2)
+    model = SiameseChangeDetector(in_channels=4, features=[8, 16, 32, 64])
+
+    trainer = DeforestationTrainer(
+        model=model,
+        checkpoint_dir=str(tmp_path / "chk"),
+    )
+    history = trainer.fit(loader, loader, epochs=0)
+    assert history == []
+    summary = trainer.get_metrics_summary()
+    assert summary["epochs_completed"] == 0
+
+
+def test_compliance_manager_with_geojson_feature_collections():
+    mgr = StudioComplianceManager()
+
+    # Pass plots as a full GeoJSON FeatureCollection
+    plots_fc = {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "id": "plot-amazon-01",
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [
+                        [
+                            [-60.015, -3.015],
+                            [-59.985, -3.015],
+                            [-59.985, -2.985],
+                            [-60.015, -2.985],
+                            [-60.015, -3.015],
+                        ]
+                    ],
+                },
+                "properties": {"plot_id": "PLOT-FC-01", "declared_area_ha": 35.0},
+            }
+        ],
+    }
+
+    # Pass alerts as a full GeoJSON FeatureCollection
+    alerts_fc = {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "id": "alert-cluster-0042",
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [
+                        [
+                            [-60.005, -3.005],
+                            [-59.995, -3.005],
+                            [-59.995, -2.995],
+                            [-60.005, -2.995],
+                            [-60.005, -3.005],
+                        ]
+                    ],
+                },
+                "properties": {
+                    "cluster_id": 42,
+                    "area_ha": 8.5,
+                    "detection_date": "2023-09-01T12:00:00Z",
+                },
+            }
+        ],
+    }
+
+    report = mgr.audit_statement(
+        statement_id="DDS-FC-TEST",
+        operator_name="Eco Amazon Forestry",
+        commodity="soya",
+        country="Brazil",
+        plots=plots_fc,
+        alerts=alerts_fc,
+    )
+
+    assert report["overall_status"] == "NON_COMPLIANT"
+    assert report["risk_score"] > 0.0
+    plot_res = report["plots"][0]
+    assert plot_res["plot_id"] == "plot-amazon-01" or plot_res["plot_id"] == "PLOT-FC-01"
+    assert len(plot_res["violations"]) > 0
+    assert len(plot_res["alert_overlaps"]) == 1
+    assert plot_res["alert_overlaps"][0]["alert_id"] == "alert-cluster-0042"
+    assert plot_res["alert_overlaps"][0]["alert_area_ha"] == 8.5
+
+
+def test_studio_training_multimodal_and_unet(tmp_path):
+    mgr = StudioTrainingManager(checkpoint_dir=str(tmp_path / "checkpoints"))
+
+    # Test multimodal architecture with custom learning rate
+    res_multi = mgr.train_model(
+        architecture="multimodal",
+        learning_rate=0.002,
+        epochs=1,
+        batch_size=2,
+        num_samples=4,
+    )
+    assert res_multi["architecture"] == "multimodal"
+    assert abs(res_multi["history"][0]["lr"] - 0.002) < 1e-6
+
+    # Test unet architecture without LoRA
+    res_unet = mgr.train_model(
+        architecture="unet",
+        use_lora=False,
+        learning_rate=0.0005,
+        epochs=1,
+        batch_size=2,
+        num_samples=4,
+    )
+    assert res_unet["architecture"] == "unet"
+    assert res_unet["use_lora"] is False
+    assert abs(res_unet["history"][0]["lr"] - 0.0005) < 1e-6
+

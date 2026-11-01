@@ -209,7 +209,7 @@ streamlit run studio.py
 
 ## Verification & Testing Suite
 
-All 57 unit and integration tests execute with a 100% pass rate:
+All 62 unit and integration tests execute with a 100% pass rate:
 ```bash
 pytest tests/ -v
 ```
@@ -268,9 +268,14 @@ tests/test_studio.py::test_web_studio_api_olofsson PASSED
 tests/test_studio.py::test_web_studio_api_stac_search PASSED
 tests/test_studio.py::test_web_studio_api_checkpoints PASSED
 tests/test_studio.py::test_web_studio_api_train PASSED
+tests/test_studio.py::test_web_studio_api_train_status PASSED
+tests/test_studio.py::test_trainer_learning_rate_and_csv_export PASSED
+tests/test_studio.py::test_trainer_fit_zero_epochs PASSED
+tests/test_studio.py::test_compliance_manager_with_geojson_feature_collections PASSED
+tests/test_studio.py::test_studio_training_multimodal_and_unet PASSED
 tests/test_training.py::test_spatial_block_cross_validation_split PASSED
 tests/test_training.py::test_trainer_type_hints PASSED
 tests/test_training.py::test_deforestation_metrics_computation PASSED
 tests/test_training.py::test_trainer_single_epoch_run PASSED
-======================= 57 passed in 14.48s ========================
+======================= 62 passed in 13.65s ========================
 ```
