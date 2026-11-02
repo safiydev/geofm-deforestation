@@ -447,7 +447,15 @@ def download_and_cache_real_data(
 ) -> Tuple[str, int]:
     """Unified entry point for loading real geospatial change detection datasets."""
     s = source_name.lower().strip()
-    if "forest" in s:
+    if "gee" in s or "earth_engine" in s:
+        from geofm.data_sources.earth_engine import download_and_cache_gee_dataset
+        return download_and_cache_gee_dataset(
+            output_dir=output_dir,
+            max_chips=max_chips or 1000,
+            chip_size=chip_size,
+            show_progress=show_progress,
+        )
+    elif "forest" in s:
         return download_and_cache_forest_change_dataset(
             output_dir=output_dir,
             max_chips=max_chips,

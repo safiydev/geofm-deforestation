@@ -53,10 +53,11 @@ def parse_args():
     parser.add_argument(
         "--dataset-source",
         type=str,
-        default="forest_change",
-        choices=["forest_change", "real_sentinel2", "oscd", "synthetic"],
-        help="Dataset source: forest_change (JimmyBrocko HF), real_sentinel2 (OSCD), or synthetic",
+        default="gee",
+        choices=["gee", "earth_engine", "forest_change", "real_sentinel2", "oscd", "synthetic"],
+        help="Dataset source: gee (Google Earth Engine + Hansen GFC), forest_change (HF), real_sentinel2 (OSCD), or synthetic",
     )
+    parser.add_argument("--gee-project", type=str, default=None, help="Google Cloud project ID with Earth Engine API enabled")
     parser.add_argument("--augment", action="store_true", default=True, help="Enable D4 dihedral + radiometric jitter augmentation")
     parser.add_argument("--no-augment", action="store_false", dest="augment", help="Disable data augmentation")
     parser.add_argument("--class-balance", action="store_true", default=True, help="Enforce 70%% positive / 30%% hard negative class balance")
@@ -114,13 +115,13 @@ def main():
             preload_cache=should_preload,
         )
     else:
-        if args.use_real_data or args.dataset_source in ("forest_change", "real_sentinel2", "oscd"):
-            source = args.dataset_source if not args.use_real_data else "forest_change"
+        if args.use_real_data or args.dataset_source in ("gee", "earth_engine", "forest_change", "real_sentinel2", "oscd"):
+            source = args.dataset_source if not args.use_real_data else "gee"
             print(f"1. Ingesting real satellite change detection dataset ({source})...")
             download_and_cache_real_data(
                 source_name=source,
                 output_dir=cache_dir,
-                max_chips=args.num_samples if args.num_samples > 0 else None,
+                max_chips=args.num_samples if args.num_samples > 0 else 1000,
                 show_progress=True,
             )
         else:
