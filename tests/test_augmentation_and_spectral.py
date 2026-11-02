@@ -1,5 +1,8 @@
 """Unit tests for bitemporal data augmentation, spectral indices, and class balance filtering."""
 
+from __future__ import annotations
+
+from typing import Dict, List, Optional, Tuple, Union
 import numpy as np
 import torch
 import pytest

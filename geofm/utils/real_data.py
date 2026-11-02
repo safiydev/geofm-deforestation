@@ -5,6 +5,8 @@ Detection (OSCD / OSCD100) dataset from Hugging Face for high-throughput
 training and EUDR-compliant deforestation alert verification.
 """
 
+from __future__ import annotations
+
 import json
 import logging
 import os
@@ -12,7 +14,7 @@ import shutil
 import urllib.request
 import zipfile
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
 from PIL import Image

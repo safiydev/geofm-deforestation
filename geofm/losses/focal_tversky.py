@@ -4,7 +4,9 @@ Applies exponential focusing to the Tversky Index to force the network to learn
 hard-to-detect subtle disturbances such as narrow logging corridors and selective logging gaps.
 """
 
-from typing import Optional
+from __future__ import annotations
+
+from typing import Optional, Union
 import torch
 import torch.nn as nn
 from geofm.losses.focal import BinaryFocalLoss

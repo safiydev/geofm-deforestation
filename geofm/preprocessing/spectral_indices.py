@@ -9,7 +9,9 @@ Appending differential spectral indices (ΔNDVI, ΔNBR) directly feeds physical
 canopy disturbance signatures into neural encoder backbones.
 """
 
-from typing import Union, Tuple
+from __future__ import annotations
+
+from typing import Optional, Tuple, Union
 import numpy as np
 import torch
 

@@ -5,6 +5,8 @@ Handles multi-spectral bands (B02, B03, B04, B08, B11, B12), coordinate referenc
 and dynamic geospatial patch sampling (RandomGeoSampler and GridGeoSampler) without manual pre-cropping.
 """
 
+from __future__ import annotations
+
 from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 import torch

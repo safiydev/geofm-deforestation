@@ -4,7 +4,9 @@ Allows asymmetric weighting of False Negatives vs False Positives (alpha > beta)
 to prioritize early warning alert sensitivity.
 """
 
-from typing import Optional
+from __future__ import annotations
+
+from typing import Optional, Union
 import torch
 import torch.nn as nn
 

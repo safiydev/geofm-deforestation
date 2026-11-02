@@ -10,7 +10,9 @@ Effectively expands training dataset diversity by 8x with zero storage overhead.
 Supports both native NumPy/PyTorch transformations and Albumentations pipelines.
 """
 
-from typing import Any, Dict, Optional, Tuple, Union
+from __future__ import annotations
+
+from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 import torch
 

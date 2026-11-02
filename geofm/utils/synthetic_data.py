@@ -6,11 +6,13 @@ Supports 6-band multispectral simulation (B02, B03, B04, B08, B11, B12),
 differential spectral indices (ΔNDVI, ΔNBR), and 70/30 class-balance filtering.
 """
 
+from __future__ import annotations
+
 import gc
 import json
 import os
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 import numpy as np
 from geofm.training.dataset import GeoSample
 from geofm.preprocessing.spectral_indices import compute_spectral_differential_stack
