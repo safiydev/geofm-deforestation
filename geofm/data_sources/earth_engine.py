@@ -66,7 +66,7 @@ def init_earth_engine(project_id: Optional[str] = None) -> bool:
         True if Earth Engine is initialized and ready, False otherwise.
     """
     if not HAS_EE:
-        logger.warning("Earth Engine Python library (earthengine-api) is not installed.")
+        print("  ⚠️ Earth Engine Python library (earthengine-api) is not installed.")
         return False
 
     try:
@@ -74,19 +74,36 @@ def init_earth_engine(project_id: Optional[str] = None) -> bool:
             ee.Initialize(project=project_id)
         else:
             ee.Initialize()
-        logger.info("Google Earth Engine initialized successfully.")
+        print(f"  ✓ Connected to Google Earth Engine (Project: {project_id or 'default'})!")
         return True
-    except Exception as e:
-        logger.info(f"Earth Engine default initialization failed ({e}). Attempting authentication...")
+    except Exception as init_err:
+        print(f"  ℹ️ Earth Engine default connection failed ({init_err}). Attempting authentication...")
+
+        # 1. Try Colab native single-sign-on first
+        try:
+            from google.colab import auth
+            print("  🔑 Requesting Google Colab authorization...")
+            auth.authenticate_user()
+            if project_id:
+                ee.Initialize(project=project_id)
+            else:
+                ee.Initialize()
+            print(f"  ✓ Google Colab authenticated with Earth Engine (Project: {project_id})!")
+            return True
+        except Exception:
+            pass
+
+        # 2. Try standard ee.Authenticate
         try:
             ee.Authenticate()
             if project_id:
                 ee.Initialize(project=project_id)
             else:
                 ee.Initialize()
+            print(f"  ✓ Earth Engine authenticated successfully (Project: {project_id})!")
             return True
         except Exception as auth_err:
-            logger.warning(f"Google Earth Engine authentication failed: {auth_err}")
+            print(f"  ⚠️ Earth Engine authentication failed: {auth_err}")
             return False
 
 
@@ -218,41 +235,13 @@ def download_and_cache_gee_dataset(
             # Active loss between 2022 and 2024 with baseline forest >= 30%
             active_loss = loss_year.gte(22).And(loss_year.lte(24)).And(tree_cover.gte(30)).rename("mask").toByte().unmask(0)
 
-            # High-speed composite generation using lowest-cloud mosaic with unmask
-            t1_composite = (
-                s2_col.filterDate(t1_date_range[0], t1_date_range[1])
-                .sort("CLOUDY_PIXEL_PERCENTAGE")
-                .limit(3)
-                .map(mask_s2)
-                .mosaic()
-                .unmask(0.0)
-            )
-            t2_composite = (
-                s2_col.filterDate(t2_date_range[0], t2_date_range[1])
-                .sort("CLOUDY_PIXEL_PERCENTAGE")
-                .limit(3)
-                .map(mask_s2)
-                .mosaic()
-                .unmask(0.0)
-            )
-
-            # Bundle all 13 bands into ONE single image:
-            # Bands 0-5:   T1 Optical (B2, B3, B4, B8, B11, B12)
-            # Bands 6-11:  T2 Optical (B2, B3, B4, B8, B11, B12)
-            # Band 12:     Hansen GFC Binary Loss Mask (0 or 1)
-            combined_image = (
-                t1_composite.select(FOREST_BANDS, [f"t1_{b}" for b in FOREST_BANDS])
-                .addBands(t2_composite.select(FOREST_BANDS, [f"t2_{b}" for b in FOREST_BANDS]))
-                .addBands(active_loss)
-            )
-
             cached_count = 0
             scanned_count = 0
             consecutive_timeouts = 0
             import tifffile
 
             # Set global socket timeout to prevent any socket hanging indefinitely
-            socket.setdefaulttimeout(12.0)
+            socket.setdefaulttimeout(15.0)
 
             with open(manifest_path, "w", encoding="utf-8") as manifest_f:
                 for idx, (w, s, e, n) in enumerate(bboxes):
@@ -263,18 +252,52 @@ def download_and_cache_gee_dataset(
                     scanned_count += 1
                     chip_t0 = time.time()
 
+                    if show_progress:
+                        print(f"  • [GEE {cached_count+1}/{max_chips}] Querying tile #{idx+1} at ({s:.2f}, {w:.2f})...", end="\r", flush=True)
+
                     try:
                         chip_id = f"gee_s2_{idx:05d}"
 
+                        # High-speed local composite with filterBounds(roi)
+                        # (Filtering by bounds prevents heavy global-collection cloud sorting)
+                        t1_img = (
+                            ee.ImageCollection(GEE_SENTINEL2_COLLECTION)
+                            .filterBounds(roi)
+                            .filterDate(t1_date_range[0], t1_date_range[1])
+                            .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 30))
+                            .sort("CLOUDY_PIXEL_PERCENTAGE")
+                            .limit(3)
+                            .map(mask_s2)
+                            .mosaic()
+                            .unmask(0.0)
+                        )
+                        t2_img = (
+                            ee.ImageCollection(GEE_SENTINEL2_COLLECTION)
+                            .filterBounds(roi)
+                            .filterDate(t2_date_range[0], t2_date_range[1])
+                            .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 30))
+                            .sort("CLOUDY_PIXEL_PERCENTAGE")
+                            .limit(3)
+                            .map(mask_s2)
+                            .mosaic()
+                            .unmask(0.0)
+                        )
+
+                        # Bundle all 13 bands into ONE single image
+                        combined_image = (
+                            t1_img.select(FOREST_BANDS, [f"t1_{b}" for b in FOREST_BANDS])
+                            .addBands(t2_img.select(FOREST_BANDS, [f"t2_{b}" for b in FOREST_BANDS]))
+                            .addBands(active_loss)
+                        )
+
                         # Fast single-request download with exact tensor dimensions
-                        # (Passing dimensions avoids CRS scale degree-vs-meter reprojection stalls)
                         url = combined_image.getDownloadURL({
                             "region": roi,
                             "dimensions": [chip_size, chip_size],
                             "format": "GEO_TIFF",
                         })
 
-                        resp = requests.get(url, timeout=(4.0, 12.0))
+                        resp = requests.get(url, timeout=(5.0, 15.0))
                         if resp.status_code != 200:
                             continue
 
@@ -340,7 +363,8 @@ def download_and_cache_gee_dataset(
                                 print("  ↳ Engaging resilient streaming fallback so training starts immediately...")
                             break
                     except Exception as chip_err:
-                        logger.debug(f"Candidate chip {chip_id} error: {chip_err}")
+                        if show_progress and idx < 5:
+                            print(f"\n  ↳ [Notice] Tile #{idx+1} skipped: {chip_err}", flush=True)
                         continue
 
             if cached_count >= max(10, max_chips // 4):
