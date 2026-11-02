@@ -57,3 +57,10 @@ venv.bak/
 .idea/
 .vscode/
 *.swp
+
+# Local caches & data
+data/
+*.zip
+*.npz
+*.csv
+

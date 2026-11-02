@@ -15,9 +15,15 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 import numpy as np
 import torch
-from torch.utils.data import Dataset, Subset
+from torch.utils.data import Dataset, Subset, Sampler
 
 logger = logging.getLogger("geofm.training.dataset")
+
+# Re-export BitemporalAugmentor for direct access from geofm.training.dataset
+try:
+    from geofm.training.augmentation import BitemporalAugmentor
+except ImportError:
+    BitemporalAugmentor = None  # type: ignore
 
 
 @dataclass
@@ -642,3 +648,145 @@ class SpatialBlockSplitter:
             train_idx = raw_train_idx
 
         return train_idx, val_idx, test_idx
+
+
+def filter_class_balance(
+    dataset: Union[LazyGeospatialDataset, GeospatialDeforestationDataset, List[GeoSample]],
+    target_pos_ratio: float = 0.70,
+    min_pos_pct: float = 5.0,
+    random_seed: int = 42,
+) -> List[int]:
+    """Filter dataset indices to enforce class balance: e.g. 70% positive (>5% deforestation), 30% hard negatives.
+
+    Args:
+        dataset: Dataset instance or sample list.
+        target_pos_ratio: Desired ratio of positive deforestation chips (0.50 to 0.70).
+        min_pos_pct: Minimum percentage of chip area deforested to qualify as positive.
+        random_seed: RNG seed for reproducible filtering.
+
+    Returns:
+        List of selected sample indices satisfying the class balance requirement.
+    """
+    rng = np.random.default_rng(random_seed)
+    n_samples = len(dataset)
+    if n_samples == 0:
+        return []
+
+    pos_indices: List[int] = []
+    neg_indices: List[int] = []
+
+    # Fast path: check if deforested_pct is pre-recorded in metadata
+    has_meta = hasattr(dataset, "samples_meta")
+
+    for i in range(n_samples):
+        pct = None
+        if has_meta:
+            m = dataset.samples_meta[i]  # type: ignore
+            if "deforested_pct" in m:
+                pct = float(m["deforested_pct"])
+
+        if pct is None:
+            # Inspect target mask array directly
+            try:
+                sample = dataset[i]
+                tgt = sample["target"]
+                tgt_arr = tgt.numpy() if isinstance(tgt, torch.Tensor) else np.array(tgt)
+                pct = float(np.mean(tgt_arr > 0.5) * 100.0)
+            except Exception:
+                pct = 0.0
+
+        if pct >= min_pos_pct:
+            pos_indices.append(i)
+        else:
+            neg_indices.append(i)
+
+    if not pos_indices:
+        # If no positive chips found, return all samples
+        return list(range(n_samples))
+
+    # Calculate balanced sample counts
+    # If target_pos_ratio = 0.7, then n_neg = n_pos * (1 - 0.7) / 0.7 = n_pos * (3/7)
+    n_pos = len(pos_indices)
+    max_neg = int(n_pos * (1.0 - target_pos_ratio) / max(1e-4, target_pos_ratio))
+    n_neg = min(len(neg_indices), max_neg)
+
+    rng.shuffle(pos_indices)
+    rng.shuffle(neg_indices)
+
+    selected = pos_indices + neg_indices[:n_neg]
+    rng.shuffle(selected)
+    return selected
+
+
+class ClassBalancedSampler(Sampler):
+    """Batch sampler ensuring 50-70% positive deforestation chips and 30-50% hard negatives per batch."""
+
+    def __init__(
+        self,
+        dataset: Union[LazyGeospatialDataset, GeospatialDeforestationDataset],
+        batch_size: int = 16,
+        pos_ratio: float = 0.70,
+        min_pos_pct: float = 5.0,
+        seed: int = 42,
+    ):
+        super().__init__(dataset)
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.pos_ratio = pos_ratio
+        self.rng = np.random.default_rng(seed)
+
+        # Identify positive and negative indices
+        self.pos_indices = []
+        self.neg_indices = []
+
+        has_meta = hasattr(dataset, "samples_meta")
+        for i in range(len(dataset)):
+            pct = None
+            if has_meta:
+                m = dataset.samples_meta[i]
+                if "deforested_pct" in m:
+                    pct = float(m["deforested_pct"])
+            if pct is None:
+                try:
+                    tgt = dataset[i]["target"]
+                    tgt_arr = tgt.numpy() if isinstance(tgt, torch.Tensor) else np.array(tgt)
+                    pct = float(np.mean(tgt_arr > 0.5) * 100.0)
+                except Exception:
+                    pct = 0.0
+
+            if pct >= min_pos_pct:
+                self.pos_indices.append(i)
+            else:
+                self.neg_indices.append(i)
+
+        if not self.pos_indices:
+            self.pos_indices = list(range(len(dataset)))
+        if not self.neg_indices:
+            self.neg_indices = list(range(len(dataset)))
+
+    def __iter__(self):
+        n_pos_per_batch = max(1, int(self.batch_size * self.pos_ratio))
+        n_neg_per_batch = max(1, self.batch_size - n_pos_per_batch)
+        n_batches = max(len(self.pos_indices) // n_pos_per_batch, 1)
+
+        pos_pool = self.rng.permutation(self.pos_indices)
+        neg_pool = self.rng.permutation(self.neg_indices)
+
+        for b in range(n_batches):
+            p_idx = pos_pool[(b * n_pos_per_batch) % len(pos_pool) : ((b + 1) * n_pos_per_batch) % len(pos_pool)]
+            if len(p_idx) < n_pos_per_batch:
+                p_idx = np.concatenate([p_idx, pos_pool[: n_pos_per_batch - len(p_idx)]])
+
+            n_idx = neg_pool[(b * n_neg_per_batch) % len(neg_pool) : ((b + 1) * n_neg_per_batch) % len(neg_pool)]
+            if len(n_idx) < n_neg_per_batch:
+                n_idx = np.concatenate([n_idx, neg_pool[: n_neg_per_batch - len(n_idx)]])
+
+            batch = np.concatenate([p_idx, n_idx])
+            self.rng.shuffle(batch)
+            yield from [int(x) for x in batch]
+
+    def __len__(self) -> int:
+        n_pos_per_batch = max(1, int(self.batch_size * self.pos_ratio))
+        n_batches = max(len(self.pos_indices) // n_pos_per_batch, 1)
+        return n_batches * self.batch_size
+

@@ -21,31 +21,46 @@ from geofm.training.dataset import (
     GeospatialDeforestationDataset,
     LazyGeospatialDataset,
     SpatialBlockSplitter,
+    filter_class_balance,
 )
+from geofm.training.augmentation import BitemporalAugmentor
 from geofm.training.trainer import DeforestationTrainer
 from geofm.utils.synthetic_data import (
     generate_synthetic_dataset,
     stream_and_cache_synthetic_dataset,
 )
+from geofm.utils.real_data import download_and_cache_real_data
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train GeoFM Deforestation Detection Network")
     parser.add_argument("--model-type", type=str, default="siamese", choices=["siamese", "multimodal", "unet"])
     parser.add_argument("--use-lora", action="store_true", help="Apply LoRA parameter-efficient fine-tuning")
-    parser.add_argument("--lora-rank", type=int, default=8, help="LoRA rank")
-    parser.add_argument("--lora-alpha", type=float, default=16.0, help="LoRA alpha scaling factor")
-    parser.add_argument("--epochs", type=int, default=3, help="Number of training epochs")
+    parser.add_argument("--lora-rank", type=int, default=16, help="LoRA rank (default: 16)")
+    parser.add_argument("--lora-alpha", type=float, default=32.0, help="LoRA alpha scaling factor (default: 32.0)")
+    parser.add_argument("--epochs", type=int, default=30, help="Number of training epochs (default: 30)")
     parser.add_argument("--batch-size", type=int, default=16, help="Batch size (e.g. 8, 16, 32)")
-    parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
+    parser.add_argument("--lr", type=float, default=None, help="Learning rate (default: 3e-4 with LoRA, 1e-4 without LoRA)")
     parser.add_argument("--loss", type=str, default="compound", choices=["compound", "focal_tversky", "focal"])
-    parser.add_argument("--num-samples", type=int, default=16, help="Synthetic dataset size for training")
+    parser.add_argument("--tversky-alpha", type=float, default=0.3, help="Tversky FP penalty weight (default: 0.3)")
+    parser.add_argument("--tversky-beta", type=float, default=0.7, help="Tversky FN penalty weight (default: 0.7)")
+    parser.add_argument("--num-samples", type=int, default=1000, help="Target dataset size for training")
     parser.add_argument("--checkpoint-dir", type=str, default="./checkpoints", help="Output directory")
     parser.add_argument("--data-dir", type=str, default=None, help="Directory containing cached .npz chips")
     parser.add_argument("--cache-dir", type=str, default=None, help="Alias for --data-dir")
     parser.add_argument("--force-generate", action="store_true", help="Force regenerate synthetic data")
-    parser.add_argument("--use-real-data", action="store_true", help="Download and ingest real Sentinel-2 satellite imagery")
-    parser.add_argument("--dataset-source", type=str, default="synthetic", choices=["synthetic", "real_sentinel2", "oscd"])
+    parser.add_argument("--use-real-data", action="store_true", help="Download and ingest real satellite imagery")
+    parser.add_argument(
+        "--dataset-source",
+        type=str,
+        default="forest_change",
+        choices=["forest_change", "real_sentinel2", "oscd", "synthetic"],
+        help="Dataset source: forest_change (JimmyBrocko HF), real_sentinel2 (OSCD), or synthetic",
+    )
+    parser.add_argument("--augment", action="store_true", default=True, help="Enable D4 dihedral + radiometric jitter augmentation")
+    parser.add_argument("--no-augment", action="store_false", dest="augment", help="Disable data augmentation")
+    parser.add_argument("--class-balance", action="store_true", default=True, help="Enforce 70%% positive / 30%% hard negative class balance")
+    parser.add_argument("--no-class-balance", action="store_false", dest="class_balance", help="Disable class balance filter")
     parser.add_argument("--num-workers", type=int, default=2 if torch.cuda.is_available() else 0, help="DataLoader worker processes")
     parser.add_argument("--prefetch-factor", type=int, default=2, help="Batches to prefetch per worker")
     parser.add_argument("--ram-cache-gb", type=float, default=None, help="Host RAM budget for chip caching in GB")
@@ -59,15 +74,22 @@ def parse_args():
 
 def main():
     args = parse_args()
+
+    # Optimal learning rate policy: 3e-4 with LoRA, 1e-4 for full backbone
+    if args.lr is None:
+        args.lr = 0.0003 if args.use_lora else 0.0001
+
     print("=" * 65)
     print("  GeoFM High-Throughput Deforestation Training Pipeline")
     print("=" * 65)
     print(f"Model Architecture: {args.model_type.upper()}")
-    print(f"PEFT / LoRA Active: {args.use_lora} (Rank: {args.lora_rank})")
-    print(f"Loss Function:      {args.loss}")
+    print(f"PEFT / LoRA Active: {args.use_lora} (Rank: {args.lora_rank}, Alpha: {args.lora_alpha})")
+    print(f"Loss Function:      {args.loss} (Tversky: alpha={args.tversky_alpha}, beta={args.tversky_beta})")
     print(f"Epochs:             {args.epochs}")
     print(f"Batch Size:         {args.batch_size}")
     print(f"Learning Rate:      {args.lr}")
+    print(f"Data Augmentation:  {args.augment} (D4 Dihedral + Radiometric Jitter)")
+    print(f"Class Balance:      {args.class_balance} (70% Positive / 30% Hard Negative)")
     print(f"Hardware Compute:   AMP (FP16) = {args.use_amp} | Workers = {args.num_workers}")
     print("-" * 65)
 
@@ -92,10 +114,11 @@ def main():
             preload_cache=should_preload,
         )
     else:
-        if args.use_real_data or args.dataset_source in ("real_sentinel2", "oscd"):
-            from geofm.utils.real_data import download_and_cache_real_sentinel2_dataset
-            print("1. Ingesting real Sentinel-2 satellite change detection dataset...")
-            download_and_cache_real_sentinel2_dataset(
+        if args.use_real_data or args.dataset_source in ("forest_change", "real_sentinel2", "oscd"):
+            source = args.dataset_source if not args.use_real_data else "forest_change"
+            print(f"1. Ingesting real satellite change detection dataset ({source})...")
+            download_and_cache_real_data(
+                source_name=source,
                 output_dir=cache_dir,
                 max_chips=args.num_samples if args.num_samples > 0 else None,
                 show_progress=True,
@@ -105,8 +128,9 @@ def main():
             stream_and_cache_synthetic_dataset(
                 output_dir=cache_dir,
                 num_samples=args.num_samples,
-                height=64,
-                width=64,
+                height=256,
+                width=256,
+                num_bands=6,
                 show_progress=True,
             )
         dataset = LazyGeospatialDataset(
@@ -116,8 +140,27 @@ def main():
         )
 
     print(f"   Dataset size: {len(dataset)} chips indexed.")
+
+    # Apply bitemporal data augmentation if requested
+    if args.augment:
+        augmentor = BitemporalAugmentor(
+            enable_flips=True,
+            enable_rot90=True,
+            enable_radiometric_jitter=True,
+            p=0.5,
+        )
+        dataset.transform = augmentor
+        print("   ✓ D4 Dihedral group & radiometric jitter augmentation active.")
+
     splitter = SpatialBlockSplitter(grid_size_deg=0.1, train_ratio=0.7, val_ratio=0.3, test_ratio=0.0)
     train_idx, val_idx, _ = splitter.split(dataset)
+
+    # Class balance filter on train split
+    if args.class_balance and len(train_idx) > 4:
+        raw_train_sub = Subset(dataset, train_idx)
+        balanced_sub_idx = filter_class_balance(raw_train_sub, target_pos_ratio=0.70, min_pos_pct=5.0)
+        train_idx = [train_idx[i] for i in balanced_sub_idx]
+        print(f"   ✓ Class balance filter applied: {len(train_idx)} training chips selected.")
 
     train_sub = Subset(dataset, train_idx)
     val_sub = Subset(dataset, val_idx)
@@ -143,14 +186,18 @@ def main():
 
     print(f"   Spatial split complete: {len(train_sub)} train samples, {len(val_sub)} val samples.")
 
-    # 2. Model Initialization
-    print("2. Initializing model architecture...")
+    # 2. Inspect input channel dimensionality dynamically
+    first_sample = dataset[0]
+    in_channels = int(first_sample["t1"].shape[0])
+    print(f"2. Initializing model architecture (Input channels: {in_channels})...")
+
     if args.model_type == "siamese":
-        model = SiameseChangeDetector(in_channels=4, features=[16, 32, 64, 128])
+        model = SiameseChangeDetector(in_channels=in_channels, features=[16, 32, 64, 128])
     elif args.model_type == "multimodal":
-        model = MultimodalFusionDeforestationNet(opt_channels=4, sar_channels=3, features=[16, 32, 64, 128])
+        sar_channels = int(first_sample["sar"].shape[0]) if "sar" in first_sample and first_sample["sar"] is not None else 3
+        model = MultimodalFusionDeforestationNet(opt_channels=in_channels, sar_channels=sar_channels, features=[16, 32, 64, 128])
     else:
-        model = UNet(in_channels=4, num_classes=1, features=[16, 32, 64, 128])
+        model = UNet(in_channels=in_channels, num_classes=1, features=[16, 32, 64, 128])
 
     # 3. LoRA PEFT injection if requested
     if args.use_lora:
@@ -160,11 +207,20 @@ def main():
         print(f"   Trainable Parameters: {lora_stats['trainable_parameters']:,} ({lora_stats['trainable_fraction']*100:.2f}%)")
         print(f"   Adapted Layers:       {lora_stats['adapted_layers']}")
 
-    # 4. Loss Function
+    # 4. Loss Function (Asymmetric Tversky Penalizing Missed Deforestation Heavier)
     if args.loss == "compound":
-        criterion = CompoundDeforestationLoss(alpha=0.75, beta=0.25)
+        criterion = CompoundDeforestationLoss(
+            alpha=args.tversky_alpha,
+            beta=args.tversky_beta,
+            focal_weight=0.5,
+            tversky_weight=0.5,
+        )
     elif args.loss == "focal_tversky":
-        criterion = FocalTverskyLoss(alpha=0.7, beta=0.3, gamma=1.33)
+        criterion = FocalTverskyLoss(
+            alpha=args.tversky_alpha,
+            beta=args.tversky_beta,
+            gamma=1.33,
+        )
     else:
         criterion = BinaryFocalLoss(alpha=0.75, gamma=2.0)
 
