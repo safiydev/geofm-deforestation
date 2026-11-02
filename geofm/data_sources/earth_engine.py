@@ -212,27 +212,38 @@ def download_and_cache_gee_dataset(
             except Exception:
                 gfc = ee.Image(GEE_HANSEN_FALLBACK)
 
-            tree_loss = gfc.select("loss")
             loss_year = gfc.select("lossyear")
             tree_cover = gfc.select("treecover2000")
 
-            # Loss occurring in 2023 or 2024 with baseline forest >= 30%
-            active_loss = loss_year.gte(23).And(loss_year.lte(24)).And(tree_cover.gte(30))
+            # Active loss between 2022 and 2024 with baseline forest >= 30%
+            active_loss = loss_year.gte(22).And(loss_year.lte(24)).And(tree_cover.gte(30)).rename("mask").toByte().unmask(0)
 
-            # Optimize median composite generation by sorting and limiting to top 5 scenes
+            # High-speed composite generation using lowest-cloud mosaic with unmask
             t1_composite = (
                 s2_col.filterDate(t1_date_range[0], t1_date_range[1])
                 .sort("CLOUDY_PIXEL_PERCENTAGE")
-                .limit(5)
+                .limit(3)
                 .map(mask_s2)
-                .median()
+                .mosaic()
+                .unmask(0.0)
             )
             t2_composite = (
                 s2_col.filterDate(t2_date_range[0], t2_date_range[1])
                 .sort("CLOUDY_PIXEL_PERCENTAGE")
-                .limit(5)
+                .limit(3)
                 .map(mask_s2)
-                .median()
+                .mosaic()
+                .unmask(0.0)
+            )
+
+            # Bundle all 13 bands into ONE single image:
+            # Bands 0-5:   T1 Optical (B2, B3, B4, B8, B11, B12)
+            # Bands 6-11:  T2 Optical (B2, B3, B4, B8, B11, B12)
+            # Band 12:     Hansen GFC Binary Loss Mask (0 or 1)
+            combined_image = (
+                t1_composite.select(FOREST_BANDS, [f"t1_{b}" for b in FOREST_BANDS])
+                .addBands(t2_composite.select(FOREST_BANDS, [f"t2_{b}" for b in FOREST_BANDS]))
+                .addBands(active_loss)
             )
 
             cached_count = 0
@@ -241,7 +252,7 @@ def download_and_cache_gee_dataset(
             import tifffile
 
             # Set global socket timeout to prevent any socket hanging indefinitely
-            socket.setdefaulttimeout(10.0)
+            socket.setdefaulttimeout(12.0)
 
             with open(manifest_path, "w", encoding="utf-8") as manifest_f:
                 for idx, (w, s, e, n) in enumerate(bboxes):
@@ -255,62 +266,38 @@ def download_and_cache_gee_dataset(
                     try:
                         chip_id = f"gee_s2_{idx:05d}"
 
-                        # 1. Fetch small 1-band Hansen mask FIRST (< 1.0s, native 30m scale avoids GEE resample hang)
-                        url_mask = active_loss.clip(roi).getDownloadURL({
-                            "scale": 30,
-                            "crs": "EPSG:4326",
+                        # Fast single-request download with exact tensor dimensions
+                        # (Passing dimensions avoids CRS scale degree-vs-meter reprojection stalls)
+                        url = combined_image.getDownloadURL({
                             "region": roi,
+                            "dimensions": [chip_size, chip_size],
                             "format": "GEO_TIFF",
                         })
 
-                        resp_m = requests.get(url_mask, timeout=(4.0, 8.0))
-                        if resp_m.status_code != 200:
+                        resp = requests.get(url, timeout=(4.0, 12.0))
+                        if resp.status_code != 200:
                             continue
 
-                        mask_raw = (tifffile.imread(io.BytesIO(resp_m.content)) > 0.5).astype(np.float32)
-                        if mask_raw.shape[-2:] != (chip_size, chip_size):
-                            pil_m = Image.fromarray((mask_raw.squeeze() * 255).astype(np.uint8))
-                            pil_m = pil_m.resize((chip_size, chip_size), Image.NEAREST)
-                            mask_arr = (np.array(pil_m) > 128).astype(np.float32)[np.newaxis, ...]
-                        else:
-                            mask_arr = mask_raw if mask_raw.ndim == 3 else mask_raw[np.newaxis, ...]
+                        arr = tifffile.imread(io.BytesIO(resp.content)).astype(np.float32)
 
+                        # Enforce (C, H, W)
+                        if arr.ndim == 3 and arr.shape[-1] == 13:
+                            arr = np.transpose(arr, (2, 0, 1))
+
+                        if arr.shape[0] < 13:
+                            continue
+
+                        t1_arr = arr[0:6]
+                        t2_arr = arr[6:12]
+                        mask_arr = (arr[12:13] > 0.5).astype(np.float32)
                         pct = float(np.mean(mask_arr > 0.5) * 100.0)
 
-                        # Fast class balance check: if positive chip required, skip without downloading 12 optical bands
+                        # Class balance check
                         if class_balance_filter:
                             if cached_count < int(max_chips * target_pos_ratio) and pct < min_pos_pct:
                                 if show_progress and scanned_count % 3 == 0:
-                                    print(f"  [GEE Frontier Scan] Evaluated {scanned_count} candidate tiles ({cached_count}/{max_chips} cached)...", end="\r", flush=True)
+                                    print(f"  [GEE Frontier Scan] Evaluated {scanned_count} candidate tiles ({cached_count}/{max_chips} positive chips cached)...", end="\r", flush=True)
                                 continue
-
-                        # 2. Fetch 6-band Sentinel-2 bitemporal optical chips
-                        url_t1 = t1_composite.clip(roi).getDownloadURL({
-                            "scale": 10,
-                            "crs": "EPSG:4326",
-                            "region": roi,
-                            "format": "GEO_TIFF",
-                        })
-                        url_t2 = t2_composite.clip(roi).getDownloadURL({
-                            "scale": 10,
-                            "crs": "EPSG:4326",
-                            "region": roi,
-                            "format": "GEO_TIFF",
-                        })
-
-                        resp1 = requests.get(url_t1, timeout=(4.0, 10.0))
-                        resp2 = requests.get(url_t2, timeout=(4.0, 10.0))
-                        if resp1.status_code != 200 or resp2.status_code != 200:
-                            continue
-
-                        t1_arr = tifffile.imread(io.BytesIO(resp1.content)).astype(np.float32)
-                        t2_arr = tifffile.imread(io.BytesIO(resp2.content)).astype(np.float32)
-
-                        # Enforce (C, H, W)
-                        if t1_arr.ndim == 3 and t1_arr.shape[-1] == 6:
-                            t1_arr = np.transpose(t1_arr, (2, 0, 1))
-                        if t2_arr.ndim == 3 and t2_arr.shape[-1] == 6:
-                            t2_arr = np.transpose(t2_arr, (2, 0, 1))
 
                         chip_file = f"{chip_id}.npz"
                         chip_path = os.path.join(output_dir, chip_file)
@@ -346,8 +333,8 @@ def download_and_cache_gee_dataset(
                     except (requests.exceptions.Timeout, requests.exceptions.RequestException, socket.timeout) as net_err:
                         consecutive_timeouts += 1
                         if show_progress:
-                            print(f"\n  ⚠️ GEE interactive download timeout ({consecutive_timeouts}/2): {net_err}")
-                        if consecutive_timeouts >= 2:
+                            print(f"\n  ⚠️ GEE interactive download timeout ({consecutive_timeouts}/3): {net_err}")
+                        if consecutive_timeouts >= 3:
                             if show_progress:
                                 print("  ↳ GEE interactive compute queue busy on Google servers.")
                                 print("  ↳ Engaging resilient streaming fallback so training starts immediately...")
@@ -464,3 +451,81 @@ task_mask.start()
 print("✓ Earth Engine export tasks submitted successfully!")
 '''
     return script
+
+
+def export_gee_dataset_to_drive(
+    project_id: str = "streammanager-499717",
+    folder: str = "geofm_chips",
+    t1_date_range: Tuple[str, str] = ("2022-06-01", "2022-10-31"),
+    t2_date_range: Tuple[str, str] = ("2023-06-01", "2023-10-31"),
+    chip_size: int = 256,
+) -> List[Any]:
+    """Submit Google Earth Engine cloud batch export tasks directly to Google Drive.
+
+    Tiles active deforestation frontiers across the Amazon, Congo, and Borneo into
+    uniform 256x256 multi-spectral patches (13 bands: T1 6-bands + T2 6-bands + Hansen mask)
+    running asynchronously on Google's cloud infrastructure with zero Colab RAM usage.
+
+    Args:
+        project_id: Google Cloud Project ID with Earth Engine enabled.
+        folder: Google Drive folder name where patches will be saved.
+        t1_date_range: Pre-disturbance acquisition window.
+        t2_date_range: Post-disturbance acquisition window.
+        chip_size: Pixel dimensions of exported patches (default: 256).
+
+    Returns:
+        List of submitted ee.batch.Task objects.
+    """
+    if not init_earth_engine(project_id):
+        raise RuntimeError("Failed to initialize Google Earth Engine for batch export.")
+
+    s2_col = ee.ImageCollection(GEE_SENTINEL2_COLLECTION).filter(
+        ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 20)
+    )
+
+    def mask_s2(img):
+        qa = img.select("QA60")
+        cloud_bit = 1 << 10
+        cirrus_bit = 1 << 11
+        clear_mask = qa.bitwiseAnd(cloud_bit).eq(0).And(qa.bitwiseAnd(cirrus_bit).eq(0))
+        return img.updateMask(clear_mask).select(FOREST_BANDS).divide(10000.0)
+
+    try:
+        gfc = ee.Image(GEE_HANSEN_COLLECTION)
+        _ = gfc.bandNames().getInfo()
+    except Exception:
+        gfc = ee.Image(GEE_HANSEN_FALLBACK)
+
+    loss_year = gfc.select("lossyear")
+    tree_cover = gfc.select("treecover2000")
+    active_loss = loss_year.gte(22).And(loss_year.lte(24)).And(tree_cover.gte(30)).rename("mask").toByte().unmask(0)
+
+    t1_composite = s2_col.filterDate(t1_date_range[0], t1_date_range[1]).sort("CLOUDY_PIXEL_PERCENTAGE").limit(3).map(mask_s2).mosaic().unmask(0.0)
+    t2_composite = s2_col.filterDate(t2_date_range[0], t2_date_range[1]).sort("CLOUDY_PIXEL_PERCENTAGE").limit(3).map(mask_s2).mosaic().unmask(0.0)
+
+    combined = (
+        t1_composite.select(FOREST_BANDS, [f"t1_{b}" for b in FOREST_BANDS])
+        .addBands(t2_composite.select(FOREST_BANDS, [f"t2_{b}" for b in FOREST_BANDS]))
+        .addBands(active_loss)
+    )
+
+    tasks = []
+    print(f"🚀 Submitting Earth Engine Batch Export tasks to Google Drive folder '{folder}'...")
+    for name, (w, s, e, n) in DEFORESTATION_HOTSPOTS.items():
+        roi = ee.Geometry.Rectangle([w, s, e, n])
+        task = ee.batch.Export.image.toDrive(
+            image=combined.clip(roi),
+            description=f"geofm_{name}",
+            folder=folder,
+            fileNamePrefix=f"patches_{name}",
+            region=roi,
+            scale=10,
+            fileFormat="GeoTIFF",
+            formatOptions={"patchDimensions": [chip_size, chip_size], "maxFileSize": 104857600},
+        )
+        task.start()
+        tasks.append(task)
+        print(f"  ✓ Started cloud batch export: geofm_{name} -> Drive/{folder}/")
+
+    print("✓ All 6 hotspot export tasks successfully submitted to Google Cloud!")
+    return tasks
