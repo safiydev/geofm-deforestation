@@ -344,13 +344,14 @@ class DeforestationTrainer:
         with open(out_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
 
-        # Also maintain a latest_metrics.json in checkpoint_dir
-        latest_path = os.path.join(self.checkpoint_dir, "latest_metrics.json")
-        try:
-            with open(latest_path, "w", encoding="utf-8") as f:
-                json.dump(payload, f, indent=2)
-        except OSError:
-            pass
+        # Maintain latest_metrics.json and metrics_history.json in checkpoint_dir
+        for name in ("latest_metrics.json", "metrics_history.json"):
+            target_json = os.path.join(self.checkpoint_dir, name)
+            try:
+                with open(target_json, "w", encoding="utf-8") as f:
+                    json.dump(payload, f, indent=2)
+            except OSError:
+                pass
 
         return out_path
 
@@ -400,12 +401,13 @@ class DeforestationTrainer:
         with open(out_path, "w", encoding="utf-8") as f:
             f.write("\n".join(lines) + "\n")
 
-        latest_csv = os.path.join(self.checkpoint_dir, "latest_metrics.csv")
-        try:
-            with open(latest_csv, "w", encoding="utf-8") as f:
-                f.write("\n".join(lines) + "\n")
-        except OSError:
-            pass
+        for name in ("latest_metrics.csv", "metrics_history.csv"):
+            target_csv = os.path.join(self.checkpoint_dir, name)
+            try:
+                with open(target_csv, "w", encoding="utf-8") as f:
+                    f.write("\n".join(lines) + "\n")
+            except OSError:
+                pass
 
         return out_path
 
