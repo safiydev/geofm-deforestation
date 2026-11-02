@@ -14,15 +14,19 @@ are pending setup.
 from __future__ import annotations
 
 import gc
+import io
 import json
 import logging
 import os
+import socket
 import time
 import urllib.request
 import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
+import requests
+from PIL import Image
 
 logger = logging.getLogger("geofm.data_sources.earth_engine")
 
@@ -233,6 +237,12 @@ def download_and_cache_gee_dataset(
 
             cached_count = 0
             scanned_count = 0
+            consecutive_timeouts = 0
+            import tifffile
+
+            # Set global socket timeout to prevent any socket hanging indefinitely
+            socket.setdefaulttimeout(10.0)
+
             with open(manifest_path, "w", encoding="utf-8") as manifest_f:
                 for idx, (w, s, e, n) in enumerate(bboxes):
                     if cached_count >= max_chips:
@@ -245,19 +255,25 @@ def download_and_cache_gee_dataset(
                     try:
                         chip_id = f"gee_s2_{idx:05d}"
 
-                        # 1. Fetch small 1-band Hansen mask FIRST (< 1.0s)
+                        # 1. Fetch small 1-band Hansen mask FIRST (< 1.0s, native 30m scale avoids GEE resample hang)
                         url_mask = active_loss.clip(roi).getDownloadURL({
-                            "scale": 10,
+                            "scale": 30,
                             "crs": "EPSG:4326",
                             "region": roi,
                             "format": "GEO_TIFF",
                         })
 
-                        import tifffile
-                        reqm = urllib.request.urlopen(url_mask, timeout=15)
-                        mask_arr = (tifffile.imread(reqm) > 0.5).astype(np.float32)
-                        if mask_arr.ndim == 2:
-                            mask_arr = mask_arr[np.newaxis, ...]
+                        resp_m = requests.get(url_mask, timeout=(4.0, 8.0))
+                        if resp_m.status_code != 200:
+                            continue
+
+                        mask_raw = (tifffile.imread(io.BytesIO(resp_m.content)) > 0.5).astype(np.float32)
+                        if mask_raw.shape[-2:] != (chip_size, chip_size):
+                            pil_m = Image.fromarray((mask_raw.squeeze() * 255).astype(np.uint8))
+                            pil_m = pil_m.resize((chip_size, chip_size), Image.NEAREST)
+                            mask_arr = (np.array(pil_m) > 128).astype(np.float32)[np.newaxis, ...]
+                        else:
+                            mask_arr = mask_raw if mask_raw.ndim == 3 else mask_raw[np.newaxis, ...]
 
                         pct = float(np.mean(mask_arr > 0.5) * 100.0)
 
@@ -282,11 +298,13 @@ def download_and_cache_gee_dataset(
                             "format": "GEO_TIFF",
                         })
 
-                        req1 = urllib.request.urlopen(url_t1, timeout=25)
-                        req2 = urllib.request.urlopen(url_t2, timeout=25)
+                        resp1 = requests.get(url_t1, timeout=(4.0, 10.0))
+                        resp2 = requests.get(url_t2, timeout=(4.0, 10.0))
+                        if resp1.status_code != 200 or resp2.status_code != 200:
+                            continue
 
-                        t1_arr = tifffile.imread(req1).astype(np.float32)
-                        t2_arr = tifffile.imread(req2).astype(np.float32)
+                        t1_arr = tifffile.imread(io.BytesIO(resp1.content)).astype(np.float32)
+                        t2_arr = tifffile.imread(io.BytesIO(resp2.content)).astype(np.float32)
 
                         # Enforce (C, H, W)
                         if t1_arr.ndim == 3 and t1_arr.shape[-1] == 6:
@@ -319,11 +337,21 @@ def download_and_cache_gee_dataset(
                         manifest_f.flush()
 
                         cached_count += 1
+                        consecutive_timeouts = 0  # reset on successful download
                         if show_progress:
                             elapsed = time.time() - chip_t0
                             p = (cached_count / max_chips) * 100
                             print(f"  ✓ [GEE {cached_count:04d}/{max_chips}] Chip {chip_id} | Loss: {pct:4.1f}% | Lat/Lon: ({s:6.2f}, {w:6.2f}) | {elapsed:.1f}s ({p:.0f}%)", flush=True)
 
+                    except (requests.exceptions.Timeout, requests.exceptions.RequestException, socket.timeout) as net_err:
+                        consecutive_timeouts += 1
+                        if show_progress:
+                            print(f"\n  ⚠️ GEE interactive download timeout ({consecutive_timeouts}/2): {net_err}")
+                        if consecutive_timeouts >= 2:
+                            if show_progress:
+                                print("  ↳ GEE interactive compute queue busy on Google servers.")
+                                print("  ↳ Engaging resilient streaming fallback so training starts immediately...")
+                            break
                     except Exception as chip_err:
                         logger.debug(f"Candidate chip {chip_id} error: {chip_err}")
                         continue
