@@ -222,7 +222,7 @@ def download_and_cache_real_sentinel2_dataset(
                 # Append record to manifest
                 record = {
                     "sample_id": sample_id,
-                    "file_path": chip_path,
+                    "file_path": chip_filename,
                     "lon": float(lon),
                     "lat": float(lat),
                     "block_id": int(block_id),

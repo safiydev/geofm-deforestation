@@ -172,16 +172,24 @@ class LazyGeospatialDataset(Dataset):
                     line = line.strip()
                     if line:
                         record = json.loads(line)
-                        if "file_path" in record and not os.path.isabs(record["file_path"]):
-                            record["file_path"] = str(self.cache_dir / record["file_path"])
+                        if "file_path" in record:
+                            raw_p = record["file_path"]
+                            if os.path.isabs(raw_p) or os.path.exists(raw_p):
+                                record["file_path"] = os.path.abspath(raw_p)
+                            else:
+                                record["file_path"] = str(self.cache_dir / os.path.basename(raw_p))
                         self.samples_meta.append(record)
         elif self.cache_dir and (self.cache_dir / "manifest.json").exists():
             manifest_path = self.cache_dir / "manifest.json"
             with open(manifest_path, "r", encoding="utf-8") as f:
                 records = json.load(f)
                 for record in records:
-                    if "file_path" in record and not os.path.isabs(record["file_path"]):
-                        record["file_path"] = str(self.cache_dir / record["file_path"])
+                    if "file_path" in record:
+                        raw_p = record["file_path"]
+                        if os.path.isabs(raw_p) or os.path.exists(raw_p):
+                            record["file_path"] = os.path.abspath(raw_p)
+                        else:
+                            record["file_path"] = str(self.cache_dir / os.path.basename(raw_p))
                     self.samples_meta.append(record)
         elif file_paths is not None:
             for p in file_paths:
