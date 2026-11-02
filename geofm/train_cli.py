@@ -44,6 +44,8 @@ def parse_args():
     parser.add_argument("--data-dir", type=str, default=None, help="Directory containing cached .npz chips")
     parser.add_argument("--cache-dir", type=str, default=None, help="Alias for --data-dir")
     parser.add_argument("--force-generate", action="store_true", help="Force regenerate synthetic data")
+    parser.add_argument("--use-real-data", action="store_true", help="Download and ingest real Sentinel-2 satellite imagery")
+    parser.add_argument("--dataset-source", type=str, default="synthetic", choices=["synthetic", "real_sentinel2", "oscd"])
     parser.add_argument("--num-workers", type=int, default=2 if torch.cuda.is_available() else 0, help="DataLoader worker processes")
     parser.add_argument("--prefetch-factor", type=int, default=2, help="Batches to prefetch per worker")
     parser.add_argument("--ram-cache-gb", type=float, default=None, help="Host RAM budget for chip caching in GB")
@@ -90,14 +92,23 @@ def main():
             preload_cache=should_preload,
         )
     else:
-        print(f"1. Generating {args.num_samples} chips via zero-RAM disk streaming...")
-        stream_and_cache_synthetic_dataset(
-            output_dir=cache_dir,
-            num_samples=args.num_samples,
-            height=64,
-            width=64,
-            show_progress=True,
-        )
+        if args.use_real_data or args.dataset_source in ("real_sentinel2", "oscd"):
+            from geofm.utils.real_data import download_and_cache_real_sentinel2_dataset
+            print("1. Ingesting real Sentinel-2 satellite change detection dataset...")
+            download_and_cache_real_sentinel2_dataset(
+                output_dir=cache_dir,
+                max_chips=args.num_samples if args.num_samples > 0 else None,
+                show_progress=True,
+            )
+        else:
+            print(f"1. Generating {args.num_samples} chips via zero-RAM disk streaming...")
+            stream_and_cache_synthetic_dataset(
+                output_dir=cache_dir,
+                num_samples=args.num_samples,
+                height=64,
+                width=64,
+                show_progress=True,
+            )
         dataset = LazyGeospatialDataset(
             cache_dir=cache_dir,
             max_ram_cache_gb=args.ram_cache_gb,

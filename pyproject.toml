@@ -19,6 +19,7 @@ dependencies = [
     "uvicorn",
     "pydantic",
     "requests",
+    "tifffile",
 ]
 
 [tool.setuptools.packages.find]
