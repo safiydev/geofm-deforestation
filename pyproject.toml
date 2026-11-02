@@ -20,6 +20,7 @@ dependencies = [
     "pydantic",
     "requests",
     "tifffile",
+    "earthengine-api",
 ]
 
 [tool.setuptools.packages.find]
