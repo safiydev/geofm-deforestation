@@ -17,6 +17,7 @@ import gc
 import json
 import logging
 import os
+import time
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -33,7 +34,8 @@ except ImportError:
 
 
 GEE_SENTINEL2_COLLECTION = "COPERNICUS/S2_SR_HARMONIZED"
-GEE_HANSEN_COLLECTION = "UMD/hansen/global_forest_change_2024_v1_12"
+GEE_HANSEN_COLLECTION = "UMD/hansen/global_forest_change_2025_v1_13"
+GEE_HANSEN_FALLBACK = "UMD/hansen/global_forest_change_2024_v1_12"
 GEE_DYNAMIC_WORLD = "GOOGLE/DYNAMICWORLD/V1"
 
 # 6 Crucial Multi-spectral Forest Bands: Blue, Green, Red, NIR, SWIR-1, SWIR-2
@@ -183,7 +185,7 @@ def download_and_cache_gee_dataset(
         if show_progress:
             print("  ⚡ Connected to Google Earth Engine! Sampling deforestation frontiers...")
 
-        bboxes = generate_hotspot_grid_bboxes(num_chips=max_chips * 2, seed=42)
+        bboxes = generate_hotspot_grid_bboxes(num_chips=max_chips * 4, seed=42)
 
         # Build GEE Image Pipeline
         try:
@@ -196,11 +198,16 @@ def download_and_cache_gee_dataset(
                 return img.updateMask(clear_mask).select(FOREST_BANDS).divide(10000.0)
 
             s2_col = ee.ImageCollection(GEE_SENTINEL2_COLLECTION).filter(
-                ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 25)
+                ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 20)
             )
 
-            # Hansen GFC 2024
-            gfc = ee.Image(GEE_HANSEN_COLLECTION)
+            # Hansen GFC 2025 (with graceful fallback to 2024)
+            try:
+                gfc = ee.Image(GEE_HANSEN_COLLECTION)
+                _ = gfc.bandNames().getInfo()
+            except Exception:
+                gfc = ee.Image(GEE_HANSEN_FALLBACK)
+
             tree_loss = gfc.select("loss")
             loss_year = gfc.select("lossyear")
             tree_cover = gfc.select("treecover2000")
@@ -208,22 +215,60 @@ def download_and_cache_gee_dataset(
             # Loss occurring in 2023 or 2024 with baseline forest >= 30%
             active_loss = loss_year.gte(23).And(loss_year.lte(24)).And(tree_cover.gte(30))
 
-            t1_composite = s2_col.filterDate(t1_date_range[0], t1_date_range[1]).map(mask_s2).median()
-            t2_composite = s2_col.filterDate(t2_date_range[0], t2_date_range[1]).map(mask_s2).median()
+            # Optimize median composite generation by sorting and limiting to top 5 scenes
+            t1_composite = (
+                s2_col.filterDate(t1_date_range[0], t1_date_range[1])
+                .sort("CLOUDY_PIXEL_PERCENTAGE")
+                .limit(5)
+                .map(mask_s2)
+                .median()
+            )
+            t2_composite = (
+                s2_col.filterDate(t2_date_range[0], t2_date_range[1])
+                .sort("CLOUDY_PIXEL_PERCENTAGE")
+                .limit(5)
+                .map(mask_s2)
+                .median()
+            )
 
             cached_count = 0
+            scanned_count = 0
             with open(manifest_path, "w", encoding="utf-8") as manifest_f:
                 for idx, (w, s, e, n) in enumerate(bboxes):
                     if cached_count >= max_chips:
                         break
 
                     roi = ee.Geometry.Rectangle([w, s, e, n])
+                    scanned_count += 1
+                    chip_t0 = time.time()
 
-                    # Fast download URL for small 256x256 tile
                     try:
                         chip_id = f"gee_s2_{idx:05d}"
-                        # Download T1, T2, and loss mask as compressed GeoTIFFs or NPY via URL
-                        # Note: In production GEE, computePixels or getDownloadURL retrieves pixel bytes
+
+                        # 1. Fetch small 1-band Hansen mask FIRST (< 1.0s)
+                        url_mask = active_loss.clip(roi).getDownloadURL({
+                            "scale": 10,
+                            "crs": "EPSG:4326",
+                            "region": roi,
+                            "format": "GEO_TIFF",
+                        })
+
+                        import tifffile
+                        reqm = urllib.request.urlopen(url_mask, timeout=15)
+                        mask_arr = (tifffile.imread(reqm) > 0.5).astype(np.float32)
+                        if mask_arr.ndim == 2:
+                            mask_arr = mask_arr[np.newaxis, ...]
+
+                        pct = float(np.mean(mask_arr > 0.5) * 100.0)
+
+                        # Fast class balance check: if positive chip required, skip without downloading 12 optical bands
+                        if class_balance_filter:
+                            if cached_count < int(max_chips * target_pos_ratio) and pct < min_pos_pct:
+                                if show_progress and scanned_count % 3 == 0:
+                                    print(f"  [GEE Frontier Scan] Evaluated {scanned_count} candidate tiles ({cached_count}/{max_chips} cached)...", end="\r", flush=True)
+                                continue
+
+                        # 2. Fetch 6-band Sentinel-2 bitemporal optical chips
                         url_t1 = t1_composite.clip(roi).getDownloadURL({
                             "scale": 10,
                             "crs": "EPSG:4326",
@@ -236,37 +281,18 @@ def download_and_cache_gee_dataset(
                             "region": roi,
                             "format": "GEO_TIFF",
                         })
-                        url_mask = active_loss.clip(roi).getDownloadURL({
-                            "scale": 10,
-                            "crs": "EPSG:4326",
-                            "region": roi,
-                            "format": "GEO_TIFF",
-                        })
 
-                        # Download and save
-                        import tifffile
-                        req1 = urllib.request.urlopen(url_t1, timeout=30)
-                        req2 = urllib.request.urlopen(url_t2, timeout=30)
-                        reqm = urllib.request.urlopen(url_mask, timeout=30)
+                        req1 = urllib.request.urlopen(url_t1, timeout=25)
+                        req2 = urllib.request.urlopen(url_t2, timeout=25)
 
                         t1_arr = tifffile.imread(req1).astype(np.float32)
                         t2_arr = tifffile.imread(req2).astype(np.float32)
-                        mask_arr = (tifffile.imread(reqm) > 0.5).astype(np.float32)
 
                         # Enforce (C, H, W)
                         if t1_arr.ndim == 3 and t1_arr.shape[-1] == 6:
                             t1_arr = np.transpose(t1_arr, (2, 0, 1))
                         if t2_arr.ndim == 3 and t2_arr.shape[-1] == 6:
                             t2_arr = np.transpose(t2_arr, (2, 0, 1))
-                        if mask_arr.ndim == 2:
-                            mask_arr = mask_arr[np.newaxis, ...]
-
-                        pct = float(np.mean(mask_arr > 0.5) * 100.0)
-
-                        # Class balance check
-                        if class_balance_filter:
-                            if cached_count < int(max_chips * target_pos_ratio) and pct < min_pos_pct:
-                                continue  # Look for positive deforestation tile
 
                         chip_file = f"{chip_id}.npz"
                         chip_path = os.path.join(output_dir, chip_file)
@@ -290,19 +316,22 @@ def download_and_cache_gee_dataset(
                             "block_id": int(idx % 16),
                             "deforested_pct": pct,
                         }) + "\n")
+                        manifest_f.flush()
 
                         cached_count += 1
-                        if show_progress and (cached_count % 25 == 0 or cached_count == max_chips):
+                        if show_progress:
+                            elapsed = time.time() - chip_t0
                             p = (cached_count / max_chips) * 100
-                            print(f"  [GEE Live Pipeline] Streamed {cached_count}/{max_chips} chips ({p:.0f}%) -> {output_dir}")
+                            print(f"  ✓ [GEE {cached_count:04d}/{max_chips}] Chip {chip_id} | Loss: {pct:4.1f}% | Lat/Lon: ({s:6.2f}, {w:6.2f}) | {elapsed:.1f}s ({p:.0f}%)", flush=True)
 
                     except Exception as chip_err:
-                        # Continue to next bbox
+                        logger.debug(f"Candidate chip {chip_id} error: {chip_err}")
                         continue
 
-            if cached_count >= max_chips // 2:
+            if cached_count >= max(10, max_chips // 4):
                 if show_progress:
-                    print(f"✓ GEE Ingestion Complete: {cached_count} chips cached from Google Earth Engine.")
+                    print(f"\n✓ GEE Ingestion Complete: {cached_count} chips cached from Google Earth Engine.")
+                return manifest_path, cached_count
                 return manifest_path, cached_count
 
         except Exception as gee_err:
@@ -369,10 +398,10 @@ s2_col = ee.ImageCollection('{GEE_SENTINEL2_COLLECTION}')\\
 t1_composite = s2_col.filterDate('{t1_s}', '{t1_e}').map(mask_s2_sr).median().clip(roi)
 t2_composite = s2_col.filterDate('{t2_s}', '{t2_e}').map(mask_s2_sr).median().clip(roi)
 
-# 4. Hansen Global Forest Change 2024 Deforestation Mask
-gfc2024 = ee.Image('{GEE_HANSEN_COLLECTION}')
-tree_loss = gfc2024.select('loss').clip(roi)
-loss_year = gfc2024.select('lossyear').clip(roi)
+# 4. Hansen Global Forest Change Deforestation Mask
+gfc = ee.Image('{GEE_HANSEN_COLLECTION}')
+tree_loss = gfc.select('loss').clip(roi)
+loss_year = gfc.select('lossyear').clip(roi)
 
 # Active loss between 2023 (year 23) and 2024 (year 24)
 recent_deforestation = loss_year.gte(23).And(loss_year.lte(24)).rename('deforestation_mask')

@@ -34,7 +34,7 @@ def test_gee_export_script_template():
     )
     assert "ee.Initialize" in script
     assert "COPERNICUS/S2_SR_HARMONIZED" in script
-    assert "UMD/hansen/global_forest_change_2024_v1_12" in script
+    assert "UMD/hansen/global_forest_change" in script
     assert "B2" in script and "B8" in script and "B11" in script and "B12" in script
 
 
