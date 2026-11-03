@@ -178,17 +178,16 @@ def download_and_cache_gee_dataset(
     min_pos_pct: float = 5.0,
     chip_size: int = 256,
     max_workers: int = 8,
+    overwrite_cache: bool = False,
     show_progress: bool = True,
 ) -> Tuple[str, int]:
     """Ingest 1,000+ real bi-temporal Sentinel-2 multi-spectral chips with Hansen GFC masks.
 
     Uses high-throughput parallel multi-threading (ThreadPoolExecutor) to stream real
     Sentinel-2 L2A tiles and Hansen Global Forest Change ground-truth masks concurrently
-    from Google Earth Engine. Features dual-quota class balance ingestion (70% positive /
-    30% hard negative intact forest) and automatic cache resume.
-    If GEE credentials are not yet configured, automatically falls back to generating
-    1,000+ multi-spectral 6-band chips using the zero-RAM disk streamer so the user is
-    never blocked from training immediately.
+    from Google Earth Engine. Features strict lossyear temporal filtering, 10m grid
+    reprojection/snapping to eliminate spatial drift, optical spectral grounding, and
+    dual-quota class balance ingestion (70% positive / 30% hard negative intact forest).
 
     Args:
         output_dir: Target directory where .npz chips and manifest.jsonl will be saved.
@@ -201,6 +200,7 @@ def download_and_cache_gee_dataset(
         min_pos_pct: Area threshold to qualify as positive deforestation (>5%).
         chip_size: Pixel dimensions of each chip (256x256).
         max_workers: Number of parallel download threads (default: 8).
+        overwrite_cache: Whether to purge prior cached chips (useful when fixing label drift).
         show_progress: Whether to log milestone progress to stdout.
 
     Returns:
@@ -209,9 +209,22 @@ def download_and_cache_gee_dataset(
     os.makedirs(output_dir, exist_ok=True)
     manifest_path = os.path.join(output_dir, "manifest.jsonl")
 
+    # Purge old cache if requested (e.g., when fixing misaligned labels)
+    if overwrite_cache:
+        for f in Path(output_dir).glob("*.npz"):
+            try:
+                f.unlink()
+            except Exception:
+                pass
+        if os.path.exists(manifest_path):
+            try:
+                os.remove(manifest_path)
+            except Exception:
+                pass
+
     # Check existing cache
     existing_npz = list(Path(output_dir).glob("*.npz"))
-    if os.path.exists(manifest_path) and len(existing_npz) >= max_chips:
+    if not overwrite_cache and os.path.exists(manifest_path) and len(existing_npz) >= max_chips:
         if show_progress:
             print(f"✓ Found existing cached dataset ({len(existing_npz)} chips) in {output_dir}")
         return manifest_path, len(existing_npz)
@@ -221,7 +234,7 @@ def download_and_cache_gee_dataset(
         print("  Google Earth Engine (GEE) High-Volume Deforestation Pipeline")
         print(f"  Target Scale: {max_chips} Chips ({chip_size}x{chip_size} px, 6 Multi-Spectral Bands)")
         print(f"  Bands:        {', '.join(FOREST_BANDS)} (RGB + NIR + SWIR1 + SWIR2)")
-        print(f"  Mask Source:  Hansen Global Forest Change 2025/2024 + Dynamic World")
+        print(f"  Mask Source:  Hansen GFC (Strict Annual lossyear + 10m Reprojection)")
         print(f"  Concurrency:  {max_workers} Parallel Worker Threads")
         print("=" * 65)
 
@@ -253,15 +266,17 @@ def download_and_cache_gee_dataset(
             loss_year = gfc.select("lossyear")
             tree_cover = gfc.select("treecover2000")
 
-            # Active loss between 2022 and 2024 with baseline forest >= 30%
-            active_loss = (
-                loss_year.gte(22)
-                .And(loss_year.lte(24))
-                .And(tree_cover.gte(30))
-                .rename("mask")
-                .toByte()
-                .unmask(0)
-            )
+            # Extract 2-digit years for strict annual loss matching
+            t1_yr = int(t1_date_range[0].split("-")[0]) % 100  # e.g., 2022 -> 22
+            t2_yr = int(t2_date_range[0].split("-")[0]) % 100  # e.g., 2023 -> 23
+
+            # Strictly isolate forest loss that occurred strictly in interval (t1_yr, t2_yr]
+            # For T1=2022 and T2=2023, this strictly evaluates to: lossyear == 23!
+            # Eliminates 2024 future loss (still green trees in 2023) and past loss (already bare)
+            if t2_yr > t1_yr:
+                strict_hansen_loss = loss_year.gt(t1_yr).And(loss_year.lte(t2_yr))
+            else:
+                strict_hansen_loss = loss_year.eq(t2_yr)
 
             import tifffile
             socket.setdefaulttimeout(15.0)
@@ -273,7 +288,7 @@ def download_and_cache_gee_dataset(
                 chip_path = os.path.join(output_dir, chip_file)
 
                 # Fast disk cache hit
-                if os.path.exists(chip_path):
+                if not overwrite_cache and os.path.exists(chip_path):
                     try:
                         with np.load(chip_path) as data:
                             mask_arr = data["target_mask"]
@@ -295,33 +310,60 @@ def download_and_cache_gee_dataset(
                 t0 = time.time()
                 try:
                     roi = ee.Geometry.Rectangle([w, s, e, n])
-                    t1_img = (
+                    s2_t1_col = (
                         ee.ImageCollection(GEE_SENTINEL2_COLLECTION)
                         .filterBounds(roi)
                         .filterDate(t1_date_range[0], t1_date_range[1])
                         .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 30))
                         .sort("CLOUDY_PIXEL_PERCENTAGE")
-                        .limit(3)
-                        .map(mask_s2)
-                        .mosaic()
-                        .unmask(0.0)
                     )
-                    t2_img = (
+                    s2_t2_col = (
                         ee.ImageCollection(GEE_SENTINEL2_COLLECTION)
                         .filterBounds(roi)
                         .filterDate(t2_date_range[0], t2_date_range[1])
                         .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 30))
                         .sort("CLOUDY_PIXEL_PERCENTAGE")
-                        .limit(3)
-                        .map(mask_s2)
-                        .mosaic()
-                        .unmask(0.0)
+                    )
+
+                    t1_img = s2_t1_col.limit(3).map(mask_s2).mosaic().unmask(0.0)
+                    t2_img = s2_t2_col.limit(3).map(mask_s2).mosaic().unmask(0.0)
+
+                    # Dynamic Projection Snapping:
+                    # Snap 30m Landsat Hansen mask directly to Sentinel-2 native 10m grid
+                    try:
+                        s2_sample = s2_t2_col.first()
+                        s2_proj = s2_sample.select("B4").projection()
+                    except Exception:
+                        s2_proj = "EPSG:3857"
+
+                    aligned_gfc = (
+                        strict_hansen_loss.And(tree_cover.gte(30))
+                        .reproject(crs=s2_proj, scale=10)
+                    )
+
+                    # Optical Spectral Grounding:
+                    # Guarantees that healthy green trees (high NDVI / no delta drop) are NEVER labeled deforested!
+                    ndvi_t1 = t1_img.normalizedDifference(["B8", "B4"])
+                    ndvi_t2 = t2_img.normalizedDifference(["B8", "B4"])
+                    delta_ndvi = ndvi_t2.subtract(ndvi_t1)
+
+                    # Confirmed deforestation:
+                    # 1. Hansen GFC strict annual loss event
+                    # 2. Was forest at T1 (ndvi_t1 >= 0.35)
+                    # 3. Shows physical canopy loss: delta_ndvi <= -0.06 OR ndvi_t2 <= 0.50
+                    confirmed_loss = (
+                        aligned_gfc
+                        .And(ndvi_t1.gte(0.35))
+                        .And(delta_ndvi.lte(-0.06).Or(ndvi_t2.lte(0.50)))
+                        .rename("mask")
+                        .toByte()
+                        .unmask(0)
                     )
 
                     combined_image = (
                         t1_img.select(FOREST_BANDS, [f"t1_{b}" for b in FOREST_BANDS])
                         .addBands(t2_img.select(FOREST_BANDS, [f"t2_{b}" for b in FOREST_BANDS]))
-                        .addBands(active_loss)
+                        .addBands(confirmed_loss)
                     )
 
                     url = combined_image.getDownloadURL({
@@ -648,7 +690,15 @@ def export_gee_dataset_to_drive(
 
     loss_year = gfc.select("lossyear")
     tree_cover = gfc.select("treecover2000")
-    active_loss = loss_year.gte(22).And(loss_year.lte(24)).And(tree_cover.gte(30)).rename("mask").toByte().unmask(0)
+
+    t1_yr = int(t1_date_range[0].split("-")[0]) % 100
+    t2_yr = int(t2_date_range[0].split("-")[0]) % 100
+    if t2_yr > t1_yr:
+        strict_hansen_loss = loss_year.gt(t1_yr).And(loss_year.lte(t2_yr))
+    else:
+        strict_hansen_loss = loss_year.eq(t2_yr)
+
+    active_loss = strict_hansen_loss.And(tree_cover.gte(30)).reproject(crs="EPSG:3857", scale=10).rename("mask").toByte().unmask(0)
 
     t1_composite = s2_col.filterDate(t1_date_range[0], t1_date_range[1]).sort("CLOUDY_PIXEL_PERCENTAGE").limit(3).map(mask_s2).mosaic().unmask(0.0)
     t2_composite = s2_col.filterDate(t2_date_range[0], t2_date_range[1]).sort("CLOUDY_PIXEL_PERCENTAGE").limit(3).map(mask_s2).mosaic().unmask(0.0)
