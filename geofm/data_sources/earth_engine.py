@@ -60,11 +60,12 @@ DEFORESTATION_HOTSPOTS = {
 }
 
 
-def init_earth_engine(project_id: Optional[str] = None) -> bool:
+def init_earth_engine(project_id: Optional[str] = None, interactive: bool = False) -> bool:
     """Initialize Google Earth Engine API with graceful authentication fallback.
 
     Args:
         project_id: Optional Google Cloud Project ID with Earth Engine API enabled.
+        interactive: Whether to prompt interactively for auth code (False for headless/tests).
 
     Returns:
         True if Earth Engine is initialized and ready, False otherwise.
@@ -81,9 +82,7 @@ def init_earth_engine(project_id: Optional[str] = None) -> bool:
         print(f"  ✓ Connected to Google Earth Engine (Project: {project_id or 'default'})!")
         return True
     except Exception as init_err:
-        print(f"  ℹ️ Earth Engine default connection failed ({init_err}). Attempting authentication...")
-
-        # 1. Try Colab native single-sign-on first
+        # 1. Try Colab native single-sign-on first (non-blocking in Colab UI)
         try:
             from google.colab import auth
             print("  🔑 Requesting Google Colab authorization...")
@@ -97,40 +96,35 @@ def init_earth_engine(project_id: Optional[str] = None) -> bool:
         except Exception:
             pass
 
-        # 2. Try Kaggle secrets or notebook auth mode
+        # 2. Try Kaggle secrets
         try:
             from kaggle_secrets import UserSecretsClient
             user_secrets = UserSecretsClient()
             secret_proj = user_secrets.get_secret("GEE_PROJECT_ID")
             if secret_proj:
                 project_id = secret_proj.strip()
+                ee.Initialize(project=project_id)
+                print(f"  ✓ Kaggle authenticated with Earth Engine (Project: {project_id})!")
+                return True
         except Exception:
             pass
 
-        # 3. Try notebook interactive authentication (works on Kaggle & Jupyter)
-        try:
-            ee.Authenticate(auth_mode="notebook")
-            if project_id:
-                ee.Initialize(project=project_id)
-            else:
-                ee.Initialize()
-            print(f"  ✓ Earth Engine authenticated successfully (Project: {project_id})!")
-            return True
-        except Exception:
-            pass
+        # 3. Interactive authentication only when explicitly enabled (never in headless/tests)
+        if interactive:
+            try:
+                ee.Authenticate(auth_mode="notebook")
+                if project_id:
+                    ee.Initialize(project=project_id)
+                else:
+                    ee.Initialize()
+                print(f"  ✓ Earth Engine authenticated successfully (Project: {project_id})!")
+                return True
+            except Exception:
+                pass
 
-        # 4. Fallback to standard ee.Authenticate
-        try:
-            ee.Authenticate()
-            if project_id:
-                ee.Initialize(project=project_id)
-            else:
-                ee.Initialize()
-            print(f"  ✓ Earth Engine authenticated successfully (Project: {project_id})!")
-            return True
-        except Exception as auth_err:
-            print(f"  ⚠️ Earth Engine authentication failed: {auth_err}")
-            return False
+        print("  ℹ️ Earth Engine credentials not initialized for current environment.")
+        print("  ↳ Tip: To connect Earth Engine on Kaggle, run 'import ee; ee.Authenticate(auth_mode=\"notebook\")' in a cell.")
+        return False
 
 
 def generate_hotspot_grid_bboxes(
