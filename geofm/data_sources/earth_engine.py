@@ -97,7 +97,29 @@ def init_earth_engine(project_id: Optional[str] = None) -> bool:
         except Exception:
             pass
 
-        # 2. Try standard ee.Authenticate
+        # 2. Try Kaggle secrets or notebook auth mode
+        try:
+            from kaggle_secrets import UserSecretsClient
+            user_secrets = UserSecretsClient()
+            secret_proj = user_secrets.get_secret("GEE_PROJECT_ID")
+            if secret_proj:
+                project_id = secret_proj.strip()
+        except Exception:
+            pass
+
+        # 3. Try notebook interactive authentication (works on Kaggle & Jupyter)
+        try:
+            ee.Authenticate(auth_mode="notebook")
+            if project_id:
+                ee.Initialize(project=project_id)
+            else:
+                ee.Initialize()
+            print(f"  ✓ Earth Engine authenticated successfully (Project: {project_id})!")
+            return True
+        except Exception:
+            pass
+
+        # 4. Fallback to standard ee.Authenticate
         try:
             ee.Authenticate()
             if project_id:
