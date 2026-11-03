@@ -234,9 +234,9 @@ def sample_stratified_hotspot_bboxes(
         num_pos = int(np.ceil(num_chips * target_pos_ratio))
         num_neg = max(0, num_chips - num_pos)
 
-        # 15% buffer to guarantee quota fulfillment
-        pos_buffered = int(np.ceil(num_pos * 1.15))
-        neg_buffered = int(np.ceil(num_neg * 1.15))
+        # 50% buffer to guarantee quota fulfillment even in sparse regions
+        pos_buffered = int(np.ceil(num_pos * 1.50))
+        neg_buffered = int(np.ceil(num_neg * 1.50))
 
         hotspot_list = list(DEFORESTATION_HOTSPOTS.values())
         num_hotspots = len(hotspot_list)
@@ -447,103 +447,119 @@ def download_and_cache_gee_dataset(
                         pass
 
                 t0 = time.time()
-                try:
-                    roi = ee.Geometry.Rectangle([w, s, e, n])
-                    s2_t1_col = (
-                        ee.ImageCollection(GEE_SENTINEL2_COLLECTION)
-                        .filterBounds(roi)
-                        .filterDate(t1_date_range[0], t1_date_range[1])
-                        .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 30))
-                        .sort("CLOUDY_PIXEL_PERCENTAGE")
-                    )
-                    s2_t2_col = (
-                        ee.ImageCollection(GEE_SENTINEL2_COLLECTION)
-                        .filterBounds(roi)
-                        .filterDate(t2_date_range[0], t2_date_range[1])
-                        .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 30))
-                        .sort("CLOUDY_PIXEL_PERCENTAGE")
-                    )
+                roi = ee.Geometry.Rectangle([w, s, e, n])
+                max_retries = 4
+                base_delay = 1.0
 
-                    t1_img = s2_t1_col.limit(3).map(mask_s2).mosaic().unmask(0.0)
-                    t2_img = s2_t2_col.limit(3).map(mask_s2).mosaic().unmask(0.0)
-
-                    # Dynamic Projection Snapping:
-                    # Snap 30m Landsat Hansen mask directly to Sentinel-2 native 10m grid
+                for attempt in range(max_retries):
                     try:
-                        s2_sample = s2_t2_col.first()
-                        s2_proj = s2_sample.select("B4").projection()
+                        s2_t1_col = (
+                            ee.ImageCollection(GEE_SENTINEL2_COLLECTION)
+                            .filterBounds(roi)
+                            .filterDate(t1_date_range[0], t1_date_range[1])
+                            .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 30))
+                            .sort("CLOUDY_PIXEL_PERCENTAGE")
+                        )
+                        s2_t2_col = (
+                            ee.ImageCollection(GEE_SENTINEL2_COLLECTION)
+                            .filterBounds(roi)
+                            .filterDate(t2_date_range[0], t2_date_range[1])
+                            .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 30))
+                            .sort("CLOUDY_PIXEL_PERCENTAGE")
+                        )
+
+                        t1_img = s2_t1_col.limit(3).map(mask_s2).mosaic().unmask(0.0)
+                        t2_img = s2_t2_col.limit(3).map(mask_s2).mosaic().unmask(0.0)
+
+                        # Dynamic Projection Snapping:
+                        # Snap 30m Landsat Hansen mask directly to Sentinel-2 native 10m grid
+                        try:
+                            s2_sample = s2_t2_col.first()
+                            s2_proj = s2_sample.select("B4").projection()
+                        except Exception:
+                            s2_proj = "EPSG:3857"
+
+                        aligned_gfc = (
+                            strict_hansen_loss.And(tree_cover.gte(30))
+                            .reproject(crs=s2_proj, scale=10)
+                        )
+
+                        # Optical Spectral Grounding:
+                        # Guarantees that healthy green trees (high NDVI / no delta drop) are NEVER labeled deforested!
+                        ndvi_t1 = t1_img.normalizedDifference(["B8", "B4"])
+                        ndvi_t2 = t2_img.normalizedDifference(["B8", "B4"])
+                        delta_ndvi = ndvi_t2.subtract(ndvi_t1)
+
+                        # Confirmed deforestation:
+                        # 1. Hansen GFC strict annual loss event
+                        # 2. Was forest at T1 (ndvi_t1 >= 0.35)
+                        # 3. Shows physical canopy loss: delta_ndvi <= -0.06 OR ndvi_t2 <= 0.50
+                        confirmed_loss = (
+                            aligned_gfc
+                            .And(ndvi_t1.gte(0.35))
+                            .And(delta_ndvi.lte(-0.06).Or(ndvi_t2.lte(0.50)))
+                            .rename("mask")
+                            .toByte()
+                            .unmask(0)
+                        )
+
+                        combined_image = (
+                            t1_img.select(FOREST_BANDS, [f"t1_{b}" for b in FOREST_BANDS])
+                            .addBands(t2_img.select(FOREST_BANDS, [f"t2_{b}" for b in FOREST_BANDS]))
+                            .addBands(confirmed_loss)
+                        )
+
+                        url = combined_image.getDownloadURL({
+                            "region": roi,
+                            "dimensions": [chip_size, chip_size],
+                            "format": "GEO_TIFF",
+                        })
+
+                        resp = requests.get(url, timeout=(8.0, 25.0))
+                        if resp.status_code == 200:
+                            arr = tifffile.imread(io.BytesIO(resp.content)).astype(np.float32)
+                            if arr.ndim == 3 and arr.shape[-1] == 13:
+                                arr = np.transpose(arr, (2, 0, 1))
+
+                            if arr.shape[0] < 13:
+                                return None
+
+                            t1_arr = arr[0:6]
+                            t2_arr = arr[6:12]
+                            mask_arr = (arr[12:13] > 0.5).astype(np.float32)
+                            pct = float(np.mean(mask_arr > 0.5) * 100.0)
+                            elapsed = time.time() - t0
+
+                            return {
+                                "idx": idx,
+                                "chip_id": chip_id,
+                                "chip_file": chip_file,
+                                "chip_path": chip_path,
+                                "already_saved": False,
+                                "t1": t1_arr,
+                                "t2": t2_arr,
+                                "mask": mask_arr,
+                                "pct": pct,
+                                "w": w,
+                                "s": s,
+                                "elapsed": elapsed,
+                            }
+                        elif resp.status_code in (429, 502, 503, 504) and attempt < max_retries - 1:
+                            # Exponential backoff for rate limiting or service unavailable
+                            jitter = float(np.random.uniform(0.1, 0.5))
+                            time.sleep(base_delay * (2 ** attempt) + jitter)
+                            continue
+                        else:
+                            return None
+
                     except Exception:
-                        s2_proj = "EPSG:3857"
-
-                    aligned_gfc = (
-                        strict_hansen_loss.And(tree_cover.gte(30))
-                        .reproject(crs=s2_proj, scale=10)
-                    )
-
-                    # Optical Spectral Grounding:
-                    # Guarantees that healthy green trees (high NDVI / no delta drop) are NEVER labeled deforested!
-                    ndvi_t1 = t1_img.normalizedDifference(["B8", "B4"])
-                    ndvi_t2 = t2_img.normalizedDifference(["B8", "B4"])
-                    delta_ndvi = ndvi_t2.subtract(ndvi_t1)
-
-                    # Confirmed deforestation:
-                    # 1. Hansen GFC strict annual loss event
-                    # 2. Was forest at T1 (ndvi_t1 >= 0.35)
-                    # 3. Shows physical canopy loss: delta_ndvi <= -0.06 OR ndvi_t2 <= 0.50
-                    confirmed_loss = (
-                        aligned_gfc
-                        .And(ndvi_t1.gte(0.35))
-                        .And(delta_ndvi.lte(-0.06).Or(ndvi_t2.lte(0.50)))
-                        .rename("mask")
-                        .toByte()
-                        .unmask(0)
-                    )
-
-                    combined_image = (
-                        t1_img.select(FOREST_BANDS, [f"t1_{b}" for b in FOREST_BANDS])
-                        .addBands(t2_img.select(FOREST_BANDS, [f"t2_{b}" for b in FOREST_BANDS]))
-                        .addBands(confirmed_loss)
-                    )
-
-                    url = combined_image.getDownloadURL({
-                        "region": roi,
-                        "dimensions": [chip_size, chip_size],
-                        "format": "GEO_TIFF",
-                    })
-
-                    resp = requests.get(url, timeout=(6.0, 20.0))
-                    if resp.status_code != 200:
+                        if attempt < max_retries - 1:
+                            jitter = float(np.random.uniform(0.1, 0.5))
+                            time.sleep(base_delay * (2 ** attempt) + jitter)
+                            continue
                         return None
 
-                    arr = tifffile.imread(io.BytesIO(resp.content)).astype(np.float32)
-                    if arr.ndim == 3 and arr.shape[-1] == 13:
-                        arr = np.transpose(arr, (2, 0, 1))
-
-                    if arr.shape[0] < 13:
-                        return None
-
-                    t1_arr = arr[0:6]
-                    t2_arr = arr[6:12]
-                    mask_arr = (arr[12:13] > 0.5).astype(np.float32)
-                    pct = float(np.mean(mask_arr > 0.5) * 100.0)
-                    elapsed = time.time() - t0
-
-                    return {
-                        "idx": idx,
-                        "chip_id": chip_id,
-                        "chip_file": chip_file,
-                        "chip_path": chip_path,
-                        "already_saved": False,
-                        "t1": t1_arr,
-                        "t2": t2_arr,
-                        "mask": mask_arr,
-                        "pct": pct,
-                        "w": w,
-                        "s": s,
-                        "elapsed": elapsed,
-                    }
-                except Exception:
-                    return None
+                return None
 
             max_pos = int(np.ceil(max_chips * target_pos_ratio)) if class_balance_filter else max_chips
             max_neg = max(0, max_chips - max_pos) if class_balance_filter else 0
