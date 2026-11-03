@@ -35,6 +35,11 @@ def test_stratified_hotspot_bboxes():
         assert s < n
         assert abs((e - w) - 0.0256) < 1e-4
 
+    pos_b, neg_b = sample_stratified_hotspot_bboxes(num_chips=20, chip_size_deg=0.0256, seed=42, show_progress=False, return_split=True)
+    assert len(pos_b) + len(neg_b) == 20
+    assert len(pos_b) == 14
+    assert len(neg_b) == 6
+
 
 def test_gee_export_script_template():
     script = get_gee_export_script_template(

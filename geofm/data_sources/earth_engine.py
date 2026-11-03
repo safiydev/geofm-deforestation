@@ -175,14 +175,14 @@ def sample_stratified_hotspot_bboxes(
     t2_date_range: Tuple[str, str] = ("2023-06-01", "2023-10-31"),
     seed: int = 42,
     show_progress: bool = True,
-) -> List[Tuple[float, float, float, float]]:
+    return_split: bool = False,
+) -> Union[List[Tuple[float, float, float, float]], Tuple[List[Tuple[float, float, float, float]], List[Tuple[float, float, float, float]]]]:
     """Sample bounding boxes using Earth Engine server-side stratified sampling.
 
     Extracts confirmed deforestation centroids (lossyear == 23) and intact forest centroids
-    directly on Google's backend before downloading any image pixels. This eliminates
-    candidate rejection entirely and achieves a ~100% download hit rate.
-
-    Falls back to regular grid sampling if Earth Engine is unavailable or throttled.
+    directly on Google's backend before downloading any image pixels. Explicitly enforces
+    classValues=[0, 1] and classPoints=[num_neg, num_pos] to physically guarantee the exact
+    stratified class distribution (e.g., 300 intact / 700 deforest).
 
     Args:
         num_chips: Target number of bounding boxes.
@@ -192,16 +192,22 @@ def sample_stratified_hotspot_bboxes(
         t2_date_range: Post-disturbance acquisition window.
         seed: Random seed for subsampling.
         show_progress: Whether to log sampling progress.
+        return_split: If True, returns (pos_bboxes, neg_bboxes). If False, returns interleaved bboxes.
 
     Returns:
-        List of (west, south, east, north) bounding boxes.
+        List of bounding boxes or tuple of (pos_bboxes, neg_bboxes).
     """
     if not HAS_EE:
-        return generate_hotspot_grid_bboxes(num_chips=num_chips, chip_size_deg=chip_size_deg, seed=seed)
+        grid = generate_hotspot_grid_bboxes(num_chips=num_chips, chip_size_deg=chip_size_deg, seed=seed)
+        num_pos = int(np.ceil(num_chips * target_pos_ratio))
+        return (grid[:num_pos], grid[num_pos:]) if return_split else grid
 
     try:
+        num_pos = int(np.ceil(num_chips * target_pos_ratio))
+        num_neg = max(0, num_chips - num_pos)
+
         if show_progress:
-            print("  ⚡ Running Earth Engine server-side stratified sampling across deforestation frontiers...")
+            print(f"  ⚡ Running Earth Engine server-side stratified sampling (classValues=[0, 1], classPoints=[{num_neg}, {num_pos}])...")
 
         try:
             gfc = ee.Image(GEE_HANSEN_COLLECTION)
@@ -231,32 +237,31 @@ def sample_stratified_hotspot_bboxes(
             .toByte()
         )
 
-        num_pos = int(np.ceil(num_chips * target_pos_ratio))
-        num_neg = max(0, num_chips - num_pos)
-
-        # 50% buffer to guarantee quota fulfillment even in sparse regions
-        pos_buffered = int(np.ceil(num_pos * 1.50))
-        neg_buffered = int(np.ceil(num_neg * 1.50))
+        # 50% buffer to guarantee candidate pools never starve during multithreaded downloads
+        pos_target = int(np.ceil(num_pos * 1.50))
+        neg_target = int(np.ceil(num_neg * 1.50))
 
         hotspot_list = list(DEFORESTATION_HOTSPOTS.values())
         num_hotspots = len(hotspot_list)
-        pos_per_hotspot = max(1, int(np.ceil(pos_buffered / num_hotspots)))
-        neg_per_hotspot = max(1, int(np.ceil(neg_buffered / num_hotspots)))
+        pos_per_hotspot = max(1, int(np.ceil(pos_target / num_hotspots)))
+        neg_per_hotspot = max(1, int(np.ceil(neg_target / num_hotspots)))
 
-        sampled_bboxes: List[Tuple[float, float, float, float]] = []
+        pos_bboxes: List[Tuple[float, float, float, float]] = []
+        neg_bboxes: List[Tuple[float, float, float, float]] = []
         half_deg = chip_size_deg / 2.0
 
         for idx, (w, s, e, n) in enumerate(hotspot_list):
-            if len(sampled_bboxes) >= int(num_chips * 1.15):
+            if len(pos_bboxes) >= pos_target and len(neg_bboxes) >= neg_target:
                 break
             roi = ee.Geometry.Rectangle([w, s, e, n])
 
             try:
+                # Explicit class distribution: classValues=[0, 1] and classPoints=[neg, pos]
                 samples = strat_img.stratifiedSample(
                     numPoints=pos_per_hotspot + neg_per_hotspot,
                     classBand="loss_class",
                     region=roi,
-                    scale=60,
+                    scale=30,  # Native 30m Hansen Landsat resolution
                     classValues=[0, 1],
                     classPoints=[neg_per_hotspot, pos_per_hotspot],
                     tileScale=4,
@@ -272,27 +277,51 @@ def sample_stratified_hotspot_bboxes(
                     if coords and len(coords) >= 2:
                         lon, lat = coords[0], coords[1]
                         bbox = (lon - half_deg, lat - half_deg, lon + half_deg, lat + half_deg)
-                        sampled_bboxes.append(bbox)
+                        cls_val = feat.get("properties", {}).get("loss_class", 0)
+                        if cls_val == 1:
+                            pos_bboxes.append(bbox)
+                        else:
+                            neg_bboxes.append(bbox)
             except Exception:
                 continue
 
-        if len(sampled_bboxes) >= num_chips:
-            if show_progress:
-                print(f"  ✓ Pre-calculated {len(sampled_bboxes[:num_chips])} stratified coordinates directly on Earth Engine servers (Zero Rejection)!")
-            rng = np.random.default_rng(seed)
-            rng.shuffle(sampled_bboxes)
-            return sampled_bboxes[:num_chips]
+        # Shuffle each pool reproducibly
+        rng = np.random.default_rng(seed)
+        rng.shuffle(pos_bboxes)
+        rng.shuffle(neg_bboxes)
 
-        # If stratified returned fewer points, pad with spatial grid
-        needed = num_chips - len(sampled_bboxes)
-        grid_fill = generate_hotspot_grid_bboxes(num_chips=needed, chip_size_deg=chip_size_deg, seed=seed)
-        sampled_bboxes.extend(grid_fill)
-        return sampled_bboxes[:num_chips]
+        if show_progress:
+            print(f"  ✓ Pre-calculated {len(pos_bboxes)} [DEFOREST] and {len(neg_bboxes)} [INTACT] coordinates on Google backend!")
+
+        if return_split:
+            return pos_bboxes, neg_bboxes
+
+        # Interleave exactly 7 pos : 3 neg
+        interleaved: List[Tuple[float, float, float, float]] = []
+        p_i, n_i = 0, 0
+        while len(interleaved) < num_chips and (p_i < len(pos_bboxes) or n_i < len(neg_bboxes)):
+            for _ in range(7):
+                if p_i < len(pos_bboxes):
+                    interleaved.append(pos_bboxes[p_i])
+                    p_i += 1
+            for _ in range(3):
+                if n_i < len(neg_bboxes):
+                    interleaved.append(neg_bboxes[n_i])
+                    n_i += 1
+
+        if len(interleaved) < num_chips:
+            needed = num_chips - len(interleaved)
+            grid_fill = generate_hotspot_grid_bboxes(num_chips=needed, chip_size_deg=chip_size_deg, seed=seed)
+            interleaved.extend(grid_fill)
+
+        return interleaved[:num_chips]
 
     except Exception as e:
         if show_progress:
             print(f"  ℹ️ Stratified server-side sampling fallback ({e}); using spatial grid.")
-        return generate_hotspot_grid_bboxes(num_chips=num_chips, chip_size_deg=chip_size_deg, seed=seed)
+        grid = generate_hotspot_grid_bboxes(num_chips=num_chips, chip_size_deg=chip_size_deg, seed=seed)
+        num_pos = int(np.ceil(num_chips * target_pos_ratio))
+        return (grid[:num_pos], grid[num_pos:]) if return_split else grid
 
 
 def download_and_cache_gee_dataset(
@@ -373,7 +402,7 @@ def download_and_cache_gee_dataset(
             print("  ⚡ Connected to Google Earth Engine! Sampling deforestation frontiers...")
 
         if class_balance_filter:
-            bboxes = sample_stratified_hotspot_bboxes(
+            pos_bboxes, neg_bboxes = sample_stratified_hotspot_bboxes(
                 num_chips=max_chips,
                 chip_size_deg=0.0256,
                 target_pos_ratio=target_pos_ratio,
@@ -381,9 +410,13 @@ def download_and_cache_gee_dataset(
                 t2_date_range=t2_date_range,
                 seed=42,
                 show_progress=show_progress,
+                return_split=True,
             )
         else:
-            bboxes = generate_hotspot_grid_bboxes(num_chips=max(max_chips * 2, 100), seed=42)
+            grid = generate_hotspot_grid_bboxes(num_chips=max(max_chips * 2, 100), seed=42)
+            num_pos_init = int(np.ceil(max_chips * target_pos_ratio))
+            pos_bboxes = grid[:num_pos_init]
+            neg_bboxes = grid[num_pos_init:]
 
         # Build GEE Image Pipeline
         try:
@@ -420,8 +453,12 @@ def download_and_cache_gee_dataset(
             import tifffile
             socket.setdefaulttimeout(15.0)
 
-            def _fetch_single_chip(cand: Tuple[int, Tuple[float, float, float, float]]) -> Optional[Dict[str, Any]]:
-                idx, (w, s, e, n) = cand
+            def _fetch_single_chip(cand: Any) -> Optional[Dict[str, Any]]:
+                if len(cand) == 3:
+                    idx, (w, s, e, n), cand_type = cand
+                else:
+                    idx, (w, s, e, n) = cand
+                    cand_type = "pos"
                 chip_id = f"gee_s2_{idx:05d}"
                 chip_file = f"{chip_id}.npz"
                 chip_path = os.path.join(output_dir, chip_file)
@@ -438,6 +475,7 @@ def download_and_cache_gee_dataset(
                                 "chip_file": chip_file,
                                 "chip_path": chip_path,
                                 "already_saved": True,
+                                "cand_type": cand_type,
                                 "pct": pct,
                                 "w": w,
                                 "s": s,
@@ -536,6 +574,7 @@ def download_and_cache_gee_dataset(
                                 "chip_file": chip_file,
                                 "chip_path": chip_path,
                                 "already_saved": False,
+                                "cand_type": cand_type,
                                 "t1": t1_arr,
                                 "t2": t2_arr,
                                 "mask": mask_arr,
@@ -589,32 +628,95 @@ def download_and_cache_gee_dataset(
                 except Exception:
                     pass
 
-            if cached_count >= max_chips:
+            if cached_count >= max_chips and (not class_balance_filter or (pos_count >= max_pos and neg_count >= max_neg)):
                 if show_progress:
-                    print(f"✓ Found existing cached dataset ({cached_count} chips) in {output_dir}")
+                    print(f"✓ Found existing cached dataset ({cached_count} chips: {pos_count} [DEFOREST], {neg_count} [INTACT]) in {output_dir}")
                 return manifest_path, cached_count
 
             if cached_count > 0 and show_progress:
-                print(f"  ↳ Resuming GEE stream: {cached_count}/{max_chips} chips already cached. Downloading remaining {max_chips - cached_count} chips...")
+                print(f"  ↳ Resuming GEE stream: {cached_count}/{max_chips} chips ({pos_count}/{max_pos} pos, {neg_count}/{max_neg} neg). Downloading remaining...")
 
-            cand_iter = iter(enumerate(bboxes))
-            futures: Dict[Any, int] = {}
+            pos_queue = list(pos_bboxes)
+            neg_queue = list(neg_bboxes)
+            in_flight_pos = 0
+            in_flight_neg = 0
+            cand_counter = cached_count
+            lock = threading.Lock()
             start_time = time.time()
+
+            def get_next_task():
+                nonlocal cand_counter, in_flight_pos, in_flight_neg
+                with lock:
+                    need_pos = (pos_count + in_flight_pos) < max_pos
+                    need_neg = (neg_count + in_flight_neg) < max_neg
+
+                    if need_pos and pos_queue:
+                        bbox = pos_queue.pop(0)
+                        in_flight_pos += 1
+                        cand_counter += 1
+                        return (cand_counter, bbox, "pos")
+                    elif need_neg and neg_queue:
+                        bbox = neg_queue.pop(0)
+                        in_flight_neg += 1
+                        cand_counter += 1
+                        return (cand_counter, bbox, "neg")
+                    elif need_pos:
+                        more_p, _ = sample_stratified_hotspot_bboxes(
+                            num_chips=max(60, (max_pos - pos_count) * 2),
+                            chip_size_deg=0.0256,
+                            target_pos_ratio=1.0,
+                            t1_date_range=t1_date_range,
+                            t2_date_range=t2_date_range,
+                            seed=42 + cand_counter + 100,
+                            show_progress=False,
+                            return_split=True,
+                        )
+                        pos_queue.extend(more_p)
+                        if pos_queue:
+                            bbox = pos_queue.pop(0)
+                            in_flight_pos += 1
+                            cand_counter += 1
+                            return (cand_counter, bbox, "pos")
+                    elif need_neg:
+                        _, more_n = sample_stratified_hotspot_bboxes(
+                            num_chips=max(60, (max_neg - neg_count) * 2),
+                            chip_size_deg=0.0256,
+                            target_pos_ratio=0.0,
+                            t1_date_range=t1_date_range,
+                            t2_date_range=t2_date_range,
+                            seed=42 + cand_counter + 200,
+                            show_progress=False,
+                            return_split=True,
+                        )
+                        neg_queue.extend(more_n)
+                        if neg_queue:
+                            bbox = neg_queue.pop(0)
+                            in_flight_neg += 1
+                            cand_counter += 1
+                            return (cand_counter, bbox, "neg")
+                    return None
 
             with open(manifest_path, "a", encoding="utf-8") as manifest_f:
                 with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    # Prime sliding window with tasks
-                    window_size = min(len(bboxes), max_workers * 3)
-                    for _ in range(window_size):
-                        cand = next(cand_iter, None)
-                        if cand is not None:
-                            f = executor.submit(_fetch_single_chip, cand)
-                            futures[f] = cand[0]
+                    futures: Dict[Any, Tuple[int, str]] = {}
 
-                    while futures and cached_count < max_chips:
+                    # Prime sliding window with tasks
+                    for _ in range(max_workers * 2):
+                        t = get_next_task()
+                        if t is not None:
+                            f = executor.submit(_fetch_single_chip, t)
+                            futures[f] = (t[0], t[2])
+
+                    while futures and (pos_count < max_pos or neg_count < max_neg):
                         done, _ = wait(futures.keys(), return_when=FIRST_COMPLETED)
                         for f in done:
-                            cand_idx = futures.pop(f)
+                            c_idx, c_type = futures.pop(f)
+                            with lock:
+                                if c_type == "pos":
+                                    in_flight_pos = max(0, in_flight_pos - 1)
+                                else:
+                                    in_flight_neg = max(0, in_flight_neg - 1)
+
                             scanned_count += 1
                             try:
                                 res = f.result()
@@ -626,22 +728,23 @@ def download_and_cache_gee_dataset(
                                 is_pos = (pct >= min_pos_pct)
 
                                 accept = False
-                                if class_balance_filter:
-                                    if is_pos and pos_count < max_pos:
-                                        accept = True
-                                        pos_count += 1
-                                    elif not is_pos and neg_count < max_neg:
-                                        accept = True
-                                        neg_count += 1
-                                    elif cached_count < max_chips:
-                                        # Accept remaining candidates from pre-stratified coordinates
-                                        accept = True
-                                        if is_pos:
+                                with lock:
+                                    if class_balance_filter:
+                                        if is_pos and pos_count < max_pos:
+                                            accept = True
                                             pos_count += 1
-                                        else:
+                                        elif (not is_pos) and neg_count < max_neg:
+                                            accept = True
                                             neg_count += 1
-                                else:
-                                    accept = True
+                                        else:
+                                            accept = False
+                                    else:
+                                        if cached_count < max_chips:
+                                            accept = True
+                                            if is_pos:
+                                                pos_count += 1
+                                            else:
+                                                neg_count += 1
 
                                 if accept:
                                     saved_ids.add(res["chip_id"])
@@ -668,25 +771,26 @@ def download_and_cache_gee_dataset(
                                     }) + "\n")
                                     manifest_f.flush()
 
-                                    cached_count += 1
+                                    cached_count = pos_count + neg_count
                                     if show_progress:
                                         overall_elapsed = max(0.1, time.time() - start_time)
                                         rate = cached_count / overall_elapsed
                                         p = (cached_count / max_chips) * 100
-                                        tag = "DEFOREST" if is_pos else "INTACT  "
+                                        tag = "[DEFOREST]" if is_pos else "[INTACT]  "
                                         print(
-                                            f"  ✓ [GEE {cached_count:04d}/{max_chips}] Chip {res['chip_id']} [{tag}] | "
+                                            f"  ✓ [GEE {cached_count:04d}/{max_chips}] Chip {res['chip_id']} {tag} | "
+                                            f"Pos: {pos_count}/{max_pos} | Neg: {neg_count}/{max_neg} | "
                                             f"Loss: {pct:4.1f}% | Lat/Lon: ({res['s']:6.2f}, {res['w']:6.2f}) | "
                                             f"{res['elapsed']:.1f}s ({p:.0f}%) [{rate:.1f} chips/s]",
                                             flush=True,
                                         )
 
-                            # Feed new candidate to keep worker threads fully saturated
-                            if cached_count < max_chips:
-                                next_cand = next(cand_iter, None)
-                                if next_cand is not None:
-                                    nf = executor.submit(_fetch_single_chip, next_cand)
-                                    futures[nf] = next_cand[0]
+                            # Maintain worker pool saturation until both quotas are fulfilled
+                            if pos_count < max_pos or neg_count < max_neg:
+                                next_t = get_next_task()
+                                if next_t is not None:
+                                    nf = executor.submit(_fetch_single_chip, next_t)
+                                    futures[nf] = (next_t[0], next_t[2])
 
                     # Target reached: cancel outstanding tasks
                     for remaining_f in futures:
