@@ -217,6 +217,7 @@ class DeforestationTrainer:
             train_loss = self.train_epoch(train_loader)
             val_loss, val_metrics = self.validate_epoch(val_loader, threshold=eval_threshold)
 
+            prev_lr = self.optimizer.param_groups[0]["lr"]
             if self.scheduler is not None:
                 if isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
                     self.scheduler.step(val_loss)
@@ -224,6 +225,8 @@ class DeforestationTrainer:
                     self.scheduler.step()
 
             current_lr = self.optimizer.param_groups[0]["lr"]
+            if current_lr < prev_lr:
+                print(f"  📉 [ReduceLROnPlateau] Validation loss plateau detected. Learning rate reduced: {prev_lr:.2e} -> {current_lr:.2e}")
 
             epoch_record = {
                 "epoch": epoch,

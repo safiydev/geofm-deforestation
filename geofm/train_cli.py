@@ -225,17 +225,34 @@ def main():
     else:
         criterion = BinaryFocalLoss(alpha=0.75, gamma=2.0)
 
-    # 5. Trainer with Hardware Maximization
+    # 5. Optimizer & ReduceLROnPlateau Scheduler
+    optimizer = torch.optim.AdamW(
+        [p for p in model.parameters() if p.requires_grad],
+        lr=args.lr,
+        weight_decay=1e-4,
+    )
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode="min",
+        factor=0.5,
+        patience=5,
+        min_lr=1e-5,
+    )
+
+    # 6. Trainer with Hardware Maximization
     trainer = DeforestationTrainer(
         model=model,
         criterion=criterion,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        learning_rate=args.lr,
         checkpoint_dir=args.checkpoint_dir,
         model_type=args.model_type,
         use_amp=args.use_amp,
         gradient_accumulation_steps=args.grad_accum_steps,
     )
 
-    # 6. Run Training Loop
+    # 7. Run Training Loop
     history = trainer.fit(train_loader, val_loader, epochs=args.epochs)
     print("=" * 65)
     print(f"Training completed successfully! Best Validation IoU: {trainer.best_val_iou * 100:.2f}%")
