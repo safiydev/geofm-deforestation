@@ -74,3 +74,23 @@ def test_download_and_cache_gee_fallback():
         assert sample["target"].shape[-2:] == (64, 64)
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def test_gee_export_config_validation():
+    from ee import batch
+    config = {
+        "description": "test_geofm",
+        "folder": "geofm_chips",
+        "fileNamePrefix": "patches_test",
+        "scale": 10,
+        "maxPixels": 1e9,
+        "shardSize": 256,
+        "fileDimensions": 256,
+        "skipEmptyTiles": True,
+        "fileFormat": "GeoTIFF",
+        "formatOptions": {"cloudOptimized": True},
+    }
+    opts = batch._build_image_file_export_options(config, batch.Task.ExportDestination.DRIVE)
+    assert opts["fileFormat"] == "GEO_TIFF"
+    assert opts["geoTiffOptions"]["cloudOptimized"] is True
+    assert opts["geoTiffOptions"]["tileDimensions"] == {"width": 256, "height": 256}

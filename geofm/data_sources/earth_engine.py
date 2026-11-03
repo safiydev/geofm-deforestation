@@ -994,8 +994,12 @@ def export_gee_dataset_to_drive(
             fileNamePrefix=f"patches_{name}",
             region=roi,
             scale=10,
+            maxPixels=1e9,
+            shardSize=chip_size,
+            fileDimensions=chip_size,
+            skipEmptyTiles=True,
             fileFormat="GeoTIFF",
-            formatOptions={"patchDimensions": [chip_size, chip_size], "maxFileSize": 104857600},
+            formatOptions={"cloudOptimized": True},
         )
         task.start()
         tasks.append(task)
