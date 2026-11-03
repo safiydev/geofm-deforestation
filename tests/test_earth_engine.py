@@ -9,6 +9,7 @@ import pytest
 
 from geofm.data_sources.earth_engine import (
     generate_hotspot_grid_bboxes,
+    sample_stratified_hotspot_bboxes,
     get_gee_export_script_template,
     download_and_cache_gee_dataset,
     DEFORESTATION_HOTSPOTS,
@@ -23,6 +24,15 @@ def test_hotspot_grid_bboxes():
         assert w < e
         assert s < n
         # Width should roughly equal chip_size_deg
+        assert abs((e - w) - 0.0256) < 1e-4
+
+
+def test_stratified_hotspot_bboxes():
+    bboxes = sample_stratified_hotspot_bboxes(num_chips=20, chip_size_deg=0.0256, seed=42, show_progress=False)
+    assert len(bboxes) == 20
+    for w, s, e, n in bboxes:
+        assert w < e
+        assert s < n
         assert abs((e - w) - 0.0256) < 1e-4
 
 

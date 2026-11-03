@@ -8,6 +8,7 @@ from geofm.data_sources.earth_engine import (
     download_and_cache_gee_dataset,
     get_gee_export_script_template,
     export_gee_dataset_to_drive,
+    sample_stratified_hotspot_bboxes,
     DEFORESTATION_HOTSPOTS,
 )
 from geofm.data_sources.stac_loader import STACDeforestationLoader
@@ -18,6 +19,7 @@ __all__ = [
     "download_and_cache_gee_dataset",
     "get_gee_export_script_template",
     "export_gee_dataset_to_drive",
+    "sample_stratified_hotspot_bboxes",
     "STACDeforestationLoader",
     "DEFORESTATION_HOTSPOTS",
 ]

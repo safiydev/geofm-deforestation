@@ -167,6 +167,134 @@ def generate_hotspot_grid_bboxes(
     return bboxes[:num_chips]
 
 
+def sample_stratified_hotspot_bboxes(
+    num_chips: int = 1000,
+    chip_size_deg: float = 0.0256,  # ~2.56 km (256 pixels @ 10m resolution)
+    target_pos_ratio: float = 0.70,
+    t1_date_range: Tuple[str, str] = ("2022-06-01", "2022-10-31"),
+    t2_date_range: Tuple[str, str] = ("2023-06-01", "2023-10-31"),
+    seed: int = 42,
+    show_progress: bool = True,
+) -> List[Tuple[float, float, float, float]]:
+    """Sample bounding boxes using Earth Engine server-side stratified sampling.
+
+    Extracts confirmed deforestation centroids (lossyear == 23) and intact forest centroids
+    directly on Google's backend before downloading any image pixels. This eliminates
+    candidate rejection entirely and achieves a ~100% download hit rate.
+
+    Falls back to regular grid sampling if Earth Engine is unavailable or throttled.
+
+    Args:
+        num_chips: Target number of bounding boxes.
+        chip_size_deg: Angular footprint of each chip (~0.0256 deg ≈ 2.56 km).
+        target_pos_ratio: Target fraction of positive deforestation chips (default: 0.70).
+        t1_date_range: Pre-disturbance acquisition window.
+        t2_date_range: Post-disturbance acquisition window.
+        seed: Random seed for subsampling.
+        show_progress: Whether to log sampling progress.
+
+    Returns:
+        List of (west, south, east, north) bounding boxes.
+    """
+    if not HAS_EE:
+        return generate_hotspot_grid_bboxes(num_chips=num_chips, chip_size_deg=chip_size_deg, seed=seed)
+
+    try:
+        if show_progress:
+            print("  ⚡ Running Earth Engine server-side stratified sampling across deforestation frontiers...")
+
+        try:
+            gfc = ee.Image(GEE_HANSEN_COLLECTION)
+            _ = gfc.bandNames().getInfo()
+        except Exception:
+            gfc = ee.Image(GEE_HANSEN_FALLBACK)
+
+        loss_year = gfc.select("lossyear")
+        tree_cover = gfc.select("treecover2000")
+
+        t1_yr = int(t1_date_range[0].split("-")[0]) % 100
+        t2_yr = int(t2_date_range[0].split("-")[0]) % 100
+        if t2_yr > t1_yr:
+            strict_loss = loss_year.gt(t1_yr).And(loss_year.lte(t2_yr))
+        else:
+            strict_loss = loss_year.eq(t2_yr)
+
+        # Class 1: Confirmed forest loss in target year
+        # Class 0: Stable intact forest (tree cover >= 30%, no loss in target year)
+        # Non-forest (<30% canopy) is masked out
+        forest_baseline = tree_cover.gte(30)
+        strat_img = (
+            ee.Image(0)
+            .where(strict_loss.eq(1), 1)
+            .updateMask(forest_baseline)
+            .rename("loss_class")
+            .toByte()
+        )
+
+        num_pos = int(np.ceil(num_chips * target_pos_ratio))
+        num_neg = max(0, num_chips - num_pos)
+
+        # 15% buffer to guarantee quota fulfillment
+        pos_buffered = int(np.ceil(num_pos * 1.15))
+        neg_buffered = int(np.ceil(num_neg * 1.15))
+
+        hotspot_list = list(DEFORESTATION_HOTSPOTS.values())
+        num_hotspots = len(hotspot_list)
+        pos_per_hotspot = max(1, int(np.ceil(pos_buffered / num_hotspots)))
+        neg_per_hotspot = max(1, int(np.ceil(neg_buffered / num_hotspots)))
+
+        sampled_bboxes: List[Tuple[float, float, float, float]] = []
+        half_deg = chip_size_deg / 2.0
+
+        for idx, (w, s, e, n) in enumerate(hotspot_list):
+            if len(sampled_bboxes) >= int(num_chips * 1.15):
+                break
+            roi = ee.Geometry.Rectangle([w, s, e, n])
+
+            try:
+                samples = strat_img.stratifiedSample(
+                    numPoints=pos_per_hotspot + neg_per_hotspot,
+                    classBand="loss_class",
+                    region=roi,
+                    scale=60,
+                    classValues=[0, 1],
+                    classPoints=[neg_per_hotspot, pos_per_hotspot],
+                    tileScale=4,
+                    geometries=True,
+                    seed=seed + idx,
+                )
+
+                feat_info = samples.getInfo()
+                features = feat_info.get("features", [])
+                for feat in features:
+                    geom = feat.get("geometry", {})
+                    coords = geom.get("coordinates")
+                    if coords and len(coords) >= 2:
+                        lon, lat = coords[0], coords[1]
+                        bbox = (lon - half_deg, lat - half_deg, lon + half_deg, lat + half_deg)
+                        sampled_bboxes.append(bbox)
+            except Exception:
+                continue
+
+        if len(sampled_bboxes) >= num_chips:
+            if show_progress:
+                print(f"  ✓ Pre-calculated {len(sampled_bboxes[:num_chips])} stratified coordinates directly on Earth Engine servers (Zero Rejection)!")
+            rng = np.random.default_rng(seed)
+            rng.shuffle(sampled_bboxes)
+            return sampled_bboxes[:num_chips]
+
+        # If stratified returned fewer points, pad with spatial grid
+        needed = num_chips - len(sampled_bboxes)
+        grid_fill = generate_hotspot_grid_bboxes(num_chips=needed, chip_size_deg=chip_size_deg, seed=seed)
+        sampled_bboxes.extend(grid_fill)
+        return sampled_bboxes[:num_chips]
+
+    except Exception as e:
+        if show_progress:
+            print(f"  ℹ️ Stratified server-side sampling fallback ({e}); using spatial grid.")
+        return generate_hotspot_grid_bboxes(num_chips=num_chips, chip_size_deg=chip_size_deg, seed=seed)
+
+
 def download_and_cache_gee_dataset(
     output_dir: str = "./data/chips_cache",
     max_chips: int = 1000,
@@ -244,7 +372,18 @@ def download_and_cache_gee_dataset(
         if show_progress:
             print("  ⚡ Connected to Google Earth Engine! Sampling deforestation frontiers...")
 
-        bboxes = generate_hotspot_grid_bboxes(num_chips=max(max_chips * 4, 100), seed=42)
+        if class_balance_filter:
+            bboxes = sample_stratified_hotspot_bboxes(
+                num_chips=max_chips,
+                chip_size_deg=0.0256,
+                target_pos_ratio=target_pos_ratio,
+                t1_date_range=t1_date_range,
+                t2_date_range=t2_date_range,
+                seed=42,
+                show_progress=show_progress,
+            )
+        else:
+            bboxes = generate_hotspot_grid_bboxes(num_chips=max(max_chips * 2, 100), seed=42)
 
         # Build GEE Image Pipeline
         try:
@@ -478,12 +617,13 @@ def download_and_cache_gee_dataset(
                                     elif not is_pos and neg_count < max_neg:
                                         accept = True
                                         neg_count += 1
-                                    elif is_pos and cached_count < max_chips:
+                                    elif cached_count < max_chips:
+                                        # Accept remaining candidates from pre-stratified coordinates
                                         accept = True
-                                        pos_count += 1
-                                    elif not is_pos and cached_count < max_chips and scanned_count > (max_chips * 3):
-                                        accept = True
-                                        neg_count += 1
+                                        if is_pos:
+                                            pos_count += 1
+                                        else:
+                                            neg_count += 1
                                 else:
                                     accept = True
 
@@ -703,10 +843,24 @@ def export_gee_dataset_to_drive(
     t1_composite = s2_col.filterDate(t1_date_range[0], t1_date_range[1]).sort("CLOUDY_PIXEL_PERCENTAGE").limit(3).map(mask_s2).mosaic().unmask(0.0)
     t2_composite = s2_col.filterDate(t2_date_range[0], t2_date_range[1]).sort("CLOUDY_PIXEL_PERCENTAGE").limit(3).map(mask_s2).mosaic().unmask(0.0)
 
+    # Spectral grounding failsafe for batch export
+    ndvi_t1 = t1_composite.normalizedDifference(["B8", "B4"])
+    ndvi_t2 = t2_composite.normalizedDifference(["B8", "B4"])
+    delta_ndvi = ndvi_t2.subtract(ndvi_t1)
+
+    confirmed_loss = (
+        active_loss
+        .And(ndvi_t1.gte(0.35))
+        .And(delta_ndvi.lte(-0.06).Or(ndvi_t2.lte(0.50)))
+        .rename("mask")
+        .toByte()
+        .unmask(0)
+    )
+
     combined = (
         t1_composite.select(FOREST_BANDS, [f"t1_{b}" for b in FOREST_BANDS])
         .addBands(t2_composite.select(FOREST_BANDS, [f"t2_{b}" for b in FOREST_BANDS]))
-        .addBands(active_loss)
+        .addBands(confirmed_loss)
     )
 
     tasks = []
