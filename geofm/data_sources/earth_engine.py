@@ -22,6 +22,8 @@ import socket
 import time
 import urllib.request
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
+import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
@@ -50,6 +52,8 @@ DEFORESTATION_HOTSPOTS = {
     "amazon_rondonia": (-64.5, -11.0, -62.0, -9.0),
     "amazon_para_xingu": (-53.5, -7.0, -51.5, -5.5),
     "amazon_mato_grosso": (-56.5, -12.5, -54.0, -10.5),
+    "amazon_novo_progresso": (-55.8, -7.5, -54.2, -6.0),
+    "amazon_labrea": (-65.2, -8.6, -63.5, -7.2),
     "congo_basin_drc": (18.0, -2.5, 20.5, -0.5),
     "borneo_kalimantan": (111.5, -2.5, 114.0, -0.5),
     "cerrado_matopiba": (-47.0, -10.5, -45.0, -8.5),
@@ -157,19 +161,22 @@ def download_and_cache_gee_dataset(
     target_pos_ratio: float = 0.70,
     min_pos_pct: float = 5.0,
     chip_size: int = 256,
+    max_workers: int = 8,
     show_progress: bool = True,
 ) -> Tuple[str, int]:
     """Ingest 1,000+ real bi-temporal Sentinel-2 multi-spectral chips with Hansen GFC masks.
 
-    If Google Earth Engine credentials are active, streams real Sentinel-2 L2A tiles
-    and Hansen Global Forest Change ground-truth masks directly via the Earth Engine API.
+    Uses high-throughput parallel multi-threading (ThreadPoolExecutor) to stream real
+    Sentinel-2 L2A tiles and Hansen Global Forest Change ground-truth masks concurrently
+    from Google Earth Engine. Features dual-quota class balance ingestion (70% positive /
+    30% hard negative intact forest) and automatic cache resume.
     If GEE credentials are not yet configured, automatically falls back to generating
     1,000+ multi-spectral 6-band chips using the zero-RAM disk streamer so the user is
     never blocked from training immediately.
 
     Args:
         output_dir: Target directory where .npz chips and manifest.jsonl will be saved.
-        max_chips: Target number of chips to produce (e.g. 1000, 2500, 5000).
+        max_chips: Target number of chips to produce (e.g. 40, 1000, 2500, 5000).
         project_id: Optional Google Cloud Project ID with Earth Engine enabled.
         t1_date_range: Pre-disturbance acquisition window (start, end).
         t2_date_range: Post-disturbance acquisition window (start, end).
@@ -177,6 +184,7 @@ def download_and_cache_gee_dataset(
         target_pos_ratio: Desired fraction of positive deforestation chips.
         min_pos_pct: Area threshold to qualify as positive deforestation (>5%).
         chip_size: Pixel dimensions of each chip (256x256).
+        max_workers: Number of parallel download threads (default: 8).
         show_progress: Whether to log milestone progress to stdout.
 
     Returns:
@@ -197,7 +205,8 @@ def download_and_cache_gee_dataset(
         print("  Google Earth Engine (GEE) High-Volume Deforestation Pipeline")
         print(f"  Target Scale: {max_chips} Chips ({chip_size}x{chip_size} px, 6 Multi-Spectral Bands)")
         print(f"  Bands:        {', '.join(FOREST_BANDS)} (RGB + NIR + SWIR1 + SWIR2)")
-        print(f"  Mask Source:  Hansen Global Forest Change 2024 + Dynamic World")
+        print(f"  Mask Source:  Hansen Global Forest Change 2025/2024 + Dynamic World")
+        print(f"  Concurrency:  {max_workers} Parallel Worker Threads")
         print("=" * 65)
 
     is_gee_ready = init_earth_engine(project_id)
@@ -206,7 +215,7 @@ def download_and_cache_gee_dataset(
         if show_progress:
             print("  ⚡ Connected to Google Earth Engine! Sampling deforestation frontiers...")
 
-        bboxes = generate_hotspot_grid_bboxes(num_chips=max_chips * 4, seed=42)
+        bboxes = generate_hotspot_grid_bboxes(num_chips=max(max_chips * 4, 100), seed=42)
 
         # Build GEE Image Pipeline
         try:
@@ -217,10 +226,6 @@ def download_and_cache_gee_dataset(
                 cirrus_bit = 1 << 11
                 clear_mask = qa.bitwiseAnd(cloud_bit).eq(0).And(qa.bitwiseAnd(cirrus_bit).eq(0))
                 return img.updateMask(clear_mask).select(FOREST_BANDS).divide(10000.0)
-
-            s2_col = ee.ImageCollection(GEE_SENTINEL2_COLLECTION).filter(
-                ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 20)
-            )
 
             # Hansen GFC 2025 (with graceful fallback to 2024)
             try:
@@ -233,144 +238,249 @@ def download_and_cache_gee_dataset(
             tree_cover = gfc.select("treecover2000")
 
             # Active loss between 2022 and 2024 with baseline forest >= 30%
-            active_loss = loss_year.gte(22).And(loss_year.lte(24)).And(tree_cover.gte(30)).rename("mask").toByte().unmask(0)
+            active_loss = (
+                loss_year.gte(22)
+                .And(loss_year.lte(24))
+                .And(tree_cover.gte(30))
+                .rename("mask")
+                .toByte()
+                .unmask(0)
+            )
 
-            cached_count = 0
-            scanned_count = 0
-            consecutive_timeouts = 0
             import tifffile
-
-            # Set global socket timeout to prevent any socket hanging indefinitely
             socket.setdefaulttimeout(15.0)
 
-            with open(manifest_path, "w", encoding="utf-8") as manifest_f:
-                for idx, (w, s, e, n) in enumerate(bboxes):
-                    if cached_count >= max_chips:
-                        break
+            def _fetch_single_chip(cand: Tuple[int, Tuple[float, float, float, float]]) -> Optional[Dict[str, Any]]:
+                idx, (w, s, e, n) = cand
+                chip_id = f"gee_s2_{idx:05d}"
+                chip_file = f"{chip_id}.npz"
+                chip_path = os.path.join(output_dir, chip_file)
 
-                    roi = ee.Geometry.Rectangle([w, s, e, n])
-                    scanned_count += 1
-                    chip_t0 = time.time()
-
-                    if show_progress:
-                        print(f"  • [GEE {cached_count+1}/{max_chips}] Querying tile #{idx+1} at ({s:.2f}, {w:.2f})...", end="\r", flush=True)
-
+                # Fast disk cache hit
+                if os.path.exists(chip_path):
                     try:
-                        chip_id = f"gee_s2_{idx:05d}"
+                        with np.load(chip_path) as data:
+                            mask_arr = data["target_mask"]
+                            pct = float(np.mean(mask_arr > 0.5) * 100.0)
+                            return {
+                                "idx": idx,
+                                "chip_id": chip_id,
+                                "chip_file": chip_file,
+                                "chip_path": chip_path,
+                                "already_saved": True,
+                                "pct": pct,
+                                "w": w,
+                                "s": s,
+                                "elapsed": 0.0,
+                            }
+                    except Exception:
+                        pass
 
-                        # High-speed local composite with filterBounds(roi)
-                        # (Filtering by bounds prevents heavy global-collection cloud sorting)
-                        t1_img = (
-                            ee.ImageCollection(GEE_SENTINEL2_COLLECTION)
-                            .filterBounds(roi)
-                            .filterDate(t1_date_range[0], t1_date_range[1])
-                            .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 30))
-                            .sort("CLOUDY_PIXEL_PERCENTAGE")
-                            .limit(3)
-                            .map(mask_s2)
-                            .mosaic()
-                            .unmask(0.0)
-                        )
-                        t2_img = (
-                            ee.ImageCollection(GEE_SENTINEL2_COLLECTION)
-                            .filterBounds(roi)
-                            .filterDate(t2_date_range[0], t2_date_range[1])
-                            .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 30))
-                            .sort("CLOUDY_PIXEL_PERCENTAGE")
-                            .limit(3)
-                            .map(mask_s2)
-                            .mosaic()
-                            .unmask(0.0)
-                        )
+                t0 = time.time()
+                try:
+                    roi = ee.Geometry.Rectangle([w, s, e, n])
+                    t1_img = (
+                        ee.ImageCollection(GEE_SENTINEL2_COLLECTION)
+                        .filterBounds(roi)
+                        .filterDate(t1_date_range[0], t1_date_range[1])
+                        .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 30))
+                        .sort("CLOUDY_PIXEL_PERCENTAGE")
+                        .limit(3)
+                        .map(mask_s2)
+                        .mosaic()
+                        .unmask(0.0)
+                    )
+                    t2_img = (
+                        ee.ImageCollection(GEE_SENTINEL2_COLLECTION)
+                        .filterBounds(roi)
+                        .filterDate(t2_date_range[0], t2_date_range[1])
+                        .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 30))
+                        .sort("CLOUDY_PIXEL_PERCENTAGE")
+                        .limit(3)
+                        .map(mask_s2)
+                        .mosaic()
+                        .unmask(0.0)
+                    )
 
-                        # Bundle all 13 bands into ONE single image
-                        combined_image = (
-                            t1_img.select(FOREST_BANDS, [f"t1_{b}" for b in FOREST_BANDS])
-                            .addBands(t2_img.select(FOREST_BANDS, [f"t2_{b}" for b in FOREST_BANDS]))
-                            .addBands(active_loss)
-                        )
+                    combined_image = (
+                        t1_img.select(FOREST_BANDS, [f"t1_{b}" for b in FOREST_BANDS])
+                        .addBands(t2_img.select(FOREST_BANDS, [f"t2_{b}" for b in FOREST_BANDS]))
+                        .addBands(active_loss)
+                    )
 
-                        # Fast single-request download with exact tensor dimensions
-                        url = combined_image.getDownloadURL({
-                            "region": roi,
-                            "dimensions": [chip_size, chip_size],
-                            "format": "GEO_TIFF",
-                        })
+                    url = combined_image.getDownloadURL({
+                        "region": roi,
+                        "dimensions": [chip_size, chip_size],
+                        "format": "GEO_TIFF",
+                    })
 
-                        resp = requests.get(url, timeout=(5.0, 15.0))
-                        if resp.status_code != 200:
-                            continue
+                    resp = requests.get(url, timeout=(6.0, 20.0))
+                    if resp.status_code != 200:
+                        return None
 
-                        arr = tifffile.imread(io.BytesIO(resp.content)).astype(np.float32)
+                    arr = tifffile.imread(io.BytesIO(resp.content)).astype(np.float32)
+                    if arr.ndim == 3 and arr.shape[-1] == 13:
+                        arr = np.transpose(arr, (2, 0, 1))
 
-                        # Enforce (C, H, W)
-                        if arr.ndim == 3 and arr.shape[-1] == 13:
-                            arr = np.transpose(arr, (2, 0, 1))
+                    if arr.shape[0] < 13:
+                        return None
 
-                        if arr.shape[0] < 13:
-                            continue
+                    t1_arr = arr[0:6]
+                    t2_arr = arr[6:12]
+                    mask_arr = (arr[12:13] > 0.5).astype(np.float32)
+                    pct = float(np.mean(mask_arr > 0.5) * 100.0)
+                    elapsed = time.time() - t0
 
-                        t1_arr = arr[0:6]
-                        t2_arr = arr[6:12]
-                        mask_arr = (arr[12:13] > 0.5).astype(np.float32)
-                        pct = float(np.mean(mask_arr > 0.5) * 100.0)
+                    return {
+                        "idx": idx,
+                        "chip_id": chip_id,
+                        "chip_file": chip_file,
+                        "chip_path": chip_path,
+                        "already_saved": False,
+                        "t1": t1_arr,
+                        "t2": t2_arr,
+                        "mask": mask_arr,
+                        "pct": pct,
+                        "w": w,
+                        "s": s,
+                        "elapsed": elapsed,
+                    }
+                except Exception:
+                    return None
 
-                        # Class balance check
-                        if class_balance_filter:
-                            if cached_count < int(max_chips * target_pos_ratio) and pct < min_pos_pct:
-                                if show_progress and scanned_count % 3 == 0:
-                                    print(f"  [GEE Frontier Scan] Evaluated {scanned_count} candidate tiles ({cached_count}/{max_chips} positive chips cached)...", end="\r", flush=True)
-                                continue
+            max_pos = int(np.ceil(max_chips * target_pos_ratio)) if class_balance_filter else max_chips
+            max_neg = max(0, max_chips - max_pos) if class_balance_filter else 0
 
-                        chip_file = f"{chip_id}.npz"
-                        chip_path = os.path.join(output_dir, chip_file)
-                        np.savez_compressed(
-                            chip_path,
-                            t1_optical=t1_arr,
-                            t2_optical=t2_arr,
-                            target_mask=mask_arr,
-                            sample_id=chip_id,
-                            lon=float(w),
-                            lat=float(s),
-                            block_id=int(idx % 16),
-                            deforested_pct=pct,
-                        )
+            cached_count = 0
+            pos_count = 0
+            neg_count = 0
+            scanned_count = 0
+            saved_ids = set()
 
-                        manifest_f.write(json.dumps({
-                            "sample_id": chip_id,
-                            "file_path": chip_file,
-                            "lon": float(w),
-                            "lat": float(s),
-                            "block_id": int(idx % 16),
-                            "deforested_pct": pct,
-                        }) + "\n")
-                        manifest_f.flush()
+            # Pre-scan existing manifest if available to avoid duplicates
+            if os.path.exists(manifest_path):
+                try:
+                    with open(manifest_path, "r", encoding="utf-8") as mf:
+                        for line in mf:
+                            try:
+                                entry = json.loads(line.strip())
+                                if os.path.exists(os.path.join(output_dir, entry.get("file_path", ""))):
+                                    saved_ids.add(entry["sample_id"])
+                                    if entry.get("deforested_pct", 0) >= min_pos_pct:
+                                        pos_count += 1
+                                    else:
+                                        neg_count += 1
+                                    cached_count += 1
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
 
-                        cached_count += 1
-                        consecutive_timeouts = 0  # reset on successful download
-                        if show_progress:
-                            elapsed = time.time() - chip_t0
-                            p = (cached_count / max_chips) * 100
-                            print(f"  ✓ [GEE {cached_count:04d}/{max_chips}] Chip {chip_id} | Loss: {pct:4.1f}% | Lat/Lon: ({s:6.2f}, {w:6.2f}) | {elapsed:.1f}s ({p:.0f}%)", flush=True)
+            if cached_count >= max_chips:
+                if show_progress:
+                    print(f"✓ Found existing cached dataset ({cached_count} chips) in {output_dir}")
+                return manifest_path, cached_count
 
-                    except (requests.exceptions.Timeout, requests.exceptions.RequestException, socket.timeout) as net_err:
-                        consecutive_timeouts += 1
-                        if show_progress:
-                            print(f"\n  ⚠️ GEE interactive download timeout ({consecutive_timeouts}/3): {net_err}")
-                        if consecutive_timeouts >= 3:
-                            if show_progress:
-                                print("  ↳ GEE interactive compute queue busy on Google servers.")
-                                print("  ↳ Engaging resilient streaming fallback so training starts immediately...")
-                            break
-                    except Exception as chip_err:
-                        if show_progress and idx < 5:
-                            print(f"\n  ↳ [Notice] Tile #{idx+1} skipped: {chip_err}", flush=True)
-                        continue
+            if cached_count > 0 and show_progress:
+                print(f"  ↳ Resuming GEE stream: {cached_count}/{max_chips} chips already cached. Downloading remaining {max_chips - cached_count} chips...")
 
-            if cached_count >= max(10, max_chips // 4):
+            cand_iter = iter(enumerate(bboxes))
+            futures: Dict[Any, int] = {}
+            start_time = time.time()
+
+            with open(manifest_path, "a", encoding="utf-8") as manifest_f:
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    # Prime sliding window with tasks
+                    window_size = min(len(bboxes), max_workers * 3)
+                    for _ in range(window_size):
+                        cand = next(cand_iter, None)
+                        if cand is not None:
+                            f = executor.submit(_fetch_single_chip, cand)
+                            futures[f] = cand[0]
+
+                    while futures and cached_count < max_chips:
+                        done, _ = wait(futures.keys(), return_when=FIRST_COMPLETED)
+                        for f in done:
+                            cand_idx = futures.pop(f)
+                            scanned_count += 1
+                            try:
+                                res = f.result()
+                            except Exception:
+                                res = None
+
+                            if res is not None and res["chip_id"] not in saved_ids:
+                                pct = res["pct"]
+                                is_pos = (pct >= min_pos_pct)
+
+                                accept = False
+                                if class_balance_filter:
+                                    if is_pos and pos_count < max_pos:
+                                        accept = True
+                                        pos_count += 1
+                                    elif not is_pos and neg_count < max_neg:
+                                        accept = True
+                                        neg_count += 1
+                                    elif is_pos and cached_count < max_chips:
+                                        accept = True
+                                        pos_count += 1
+                                    elif not is_pos and cached_count < max_chips and scanned_count > (max_chips * 3):
+                                        accept = True
+                                        neg_count += 1
+                                else:
+                                    accept = True
+
+                                if accept:
+                                    saved_ids.add(res["chip_id"])
+                                    if not res["already_saved"]:
+                                        np.savez_compressed(
+                                            res["chip_path"],
+                                            t1_optical=res["t1"],
+                                            t2_optical=res["t2"],
+                                            target_mask=res["mask"],
+                                            sample_id=res["chip_id"],
+                                            lon=float(res["w"]),
+                                            lat=float(res["s"]),
+                                            block_id=int(res["idx"] % 16),
+                                            deforested_pct=pct,
+                                        )
+
+                                    manifest_f.write(json.dumps({
+                                        "sample_id": res["chip_id"],
+                                        "file_path": res["chip_file"],
+                                        "lon": float(res["w"]),
+                                        "lat": float(res["s"]),
+                                        "block_id": int(res["idx"] % 16),
+                                        "deforested_pct": pct,
+                                    }) + "\n")
+                                    manifest_f.flush()
+
+                                    cached_count += 1
+                                    if show_progress:
+                                        overall_elapsed = max(0.1, time.time() - start_time)
+                                        rate = cached_count / overall_elapsed
+                                        p = (cached_count / max_chips) * 100
+                                        tag = "DEFOREST" if is_pos else "INTACT  "
+                                        print(
+                                            f"  ✓ [GEE {cached_count:04d}/{max_chips}] Chip {res['chip_id']} [{tag}] | "
+                                            f"Loss: {pct:4.1f}% | Lat/Lon: ({res['s']:6.2f}, {res['w']:6.2f}) | "
+                                            f"{res['elapsed']:.1f}s ({p:.0f}%) [{rate:.1f} chips/s]",
+                                            flush=True,
+                                        )
+
+                            # Feed new candidate to keep worker threads fully saturated
+                            if cached_count < max_chips:
+                                next_cand = next(cand_iter, None)
+                                if next_cand is not None:
+                                    nf = executor.submit(_fetch_single_chip, next_cand)
+                                    futures[nf] = next_cand[0]
+
+                    # Target reached: cancel outstanding tasks
+                    for remaining_f in futures:
+                        remaining_f.cancel()
+
+            if cached_count >= max(4, max_chips // 4):
                 if show_progress:
                     print(f"\n✓ GEE Ingestion Complete: {cached_count} chips cached from Google Earth Engine.")
-                return manifest_path, cached_count
                 return manifest_path, cached_count
 
         except Exception as gee_err:
@@ -551,5 +661,5 @@ def export_gee_dataset_to_drive(
         tasks.append(task)
         print(f"  ✓ Started cloud batch export: geofm_{name} -> Drive/{folder}/")
 
-    print("✓ All 6 hotspot export tasks successfully submitted to Google Cloud!")
+    print(f"✓ All {len(tasks)} hotspot export tasks successfully submitted to Google Cloud!")
     return tasks
