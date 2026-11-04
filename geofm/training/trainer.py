@@ -196,24 +196,149 @@ class DeforestationTrainer:
         report = metrics.compute()
         return val_loss, report
 
+    def save_checkpoint(
+        self,
+        filepath: str,
+        epoch: int,
+        val_metrics: Optional[Union[MetricReport, Dict[str, Any]]] = None,
+        extra_meta: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """Save a comprehensive training checkpoint containing model, optimizer, scheduler, and metrics."""
+        os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
+
+        metrics_dict = {}
+        if val_metrics is not None:
+            metrics_dict = val_metrics.to_dict() if hasattr(val_metrics, "to_dict") else dict(val_metrics)
+        elif self.history:
+            metrics_dict = self.history[-1]
+
+        state = {
+            "epoch": epoch,
+            "model_type": self.model_type,
+            "model_state_dict": self.model.state_dict(),
+            "optimizer_state_dict": self.optimizer.state_dict() if self.optimizer is not None else None,
+            "scheduler_state_dict": self.scheduler.state_dict() if self.scheduler is not None else None,
+            "scaler_state_dict": self.scaler.state_dict() if self.scaler is not None else None,
+            "best_val_iou": float(self.best_val_iou),
+            "best_epoch": int(self.best_epoch),
+            "patience_counter": int(self.patience_counter),
+            "metrics": metrics_dict,
+            "history": self.history,
+            "learning_rate": self.optimizer.param_groups[0]["lr"] if self.optimizer else self.learning_rate,
+            "saved_at": datetime.now(timezone.utc).isoformat(),
+        }
+        if extra_meta:
+            state.update(extra_meta)
+
+        torch.save(state, filepath)
+        return filepath
+
+    def load_checkpoint(self, checkpoint_path: str) -> int:
+        """Load checkpoint weights, optimizer, scheduler, scaler, and training history.
+
+        Args:
+            checkpoint_path: Path to .pt checkpoint file.
+
+        Returns:
+            int: The epoch index stored in the checkpoint (resumption starts at epoch + 1).
+        """
+        if not os.path.isfile(checkpoint_path):
+            raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_path}")
+
+        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+
+        # 1. Load model weights
+        if isinstance(checkpoint, dict):
+            if "model_state_dict" in checkpoint:
+                state_dict = checkpoint["model_state_dict"]
+            elif "state_dict" in checkpoint:
+                state_dict = checkpoint["state_dict"]
+            else:
+                state_dict = checkpoint
+        else:
+            state_dict = checkpoint
+
+        try:
+            self.model.load_state_dict(state_dict)
+        except RuntimeError as e:
+            print(f"⚠️ Warning during model state dict loading ({e}), attempting with strict=False...")
+            self.model.load_state_dict(state_dict, strict=False)
+
+        resumed_epoch = 0
+        if isinstance(checkpoint, dict):
+            # 2. Restore optimizer state if present
+            if self.optimizer is not None and checkpoint.get("optimizer_state_dict") is not None:
+                try:
+                    self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+                except Exception as e:
+                    print(f"⚠️ Warning: Could not restore optimizer state ({e}). Using fresh optimizer.")
+
+            # 3. Restore scheduler state if present
+            if self.scheduler is not None and checkpoint.get("scheduler_state_dict") is not None:
+                try:
+                    self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+                except Exception as e:
+                    print(f"⚠️ Warning: Could not restore scheduler state ({e}).")
+
+            # 4. Restore AMP GradScaler state if present
+            if self.scaler is not None and checkpoint.get("scaler_state_dict") is not None:
+                try:
+                    self.scaler.load_state_dict(checkpoint["scaler_state_dict"])
+                except Exception as e:
+                    print(f"⚠️ Warning: Could not restore scaler state ({e}).")
+
+            # 5. Restore tracking metrics & history
+            self.best_val_iou = float(checkpoint.get("best_val_iou", -1.0))
+            self.best_epoch = int(checkpoint.get("best_epoch", 0))
+            self.patience_counter = int(checkpoint.get("patience_counter", 0))
+
+            loaded_history = checkpoint.get("history", [])
+            if isinstance(loaded_history, list) and loaded_history:
+                self.history = list(loaded_history)
+
+            resumed_epoch = int(checkpoint.get("epoch", len(self.history)))
+
+            # If best_val_iou was not saved explicitly, reconstruct from history
+            if self.best_val_iou < 0 and self.history:
+                for rec in self.history:
+                    iou = rec.get("val_iou", -1.0)
+                    if iou > self.best_val_iou:
+                        self.best_val_iou = iou
+                        self.best_epoch = rec.get("epoch", 0)
+
+        best_iou_pct = f"{self.best_val_iou * 100:.2f}%" if self.best_val_iou >= 0 else "N/A"
+        print(
+            f"✓ Loaded checkpoint: {checkpoint_path}\n"
+            f"  • Resumed Epoch:    {resumed_epoch}\n"
+            f"  • Best Val IoU:     {best_iou_pct} (Epoch {self.best_epoch})\n"
+            f"  • History Entries:  {len(self.history)}\n"
+            f"  • Patience Counter: {self.patience_counter}/{self.early_stopping_patience}"
+        )
+        return resumed_epoch
+
     def fit(
         self,
         train_loader: DataLoader,
         val_loader: DataLoader,
         epochs: int = 10,
         eval_threshold: float = 0.5,
+        start_epoch: int = 1,
     ) -> List[Dict[str, Any]]:
         """Execute full training and validation lifecycle."""
+        if start_epoch > epochs and epochs > 0:
+            print(f"Training already completed up to epoch {start_epoch - 1} (requested epochs: {epochs}).")
+            return self.history
+
         if self.device.type == "cuda":
             device_name = torch.cuda.get_device_name(self.device)
             vram_total_gb = torch.cuda.get_device_properties(self.device).total_memory / (1024**3)
-            print(f"Starting training on {device_name} ({vram_total_gb:.1f} GB VRAM) for {epochs} epochs.")
+            print(f"Starting training on {device_name} ({vram_total_gb:.1f} GB VRAM) from epoch {start_epoch} to {epochs}.")
             print(f"  ⚡ GPU Acceleration: AMP (FP16) = {self.use_amp} | cuDNN Benchmark = True | Grad Accum = {self.gradient_accumulation_steps}")
         else:
-            print(f"Starting training on device: {self.device} for {epochs} epochs.")
-        epoch = 0
+            print(f"Starting training on device: {self.device} from epoch {start_epoch} to {epochs}.")
+        epoch = start_epoch - 1
 
-        for epoch in range(1, epochs + 1):
+        for epoch in range(start_epoch, epochs + 1):
             train_loss = self.train_epoch(train_loader)
             val_loss, val_metrics = self.validate_epoch(val_loader, threshold=eval_threshold)
 
@@ -293,35 +418,32 @@ class DeforestationTrainer:
                 self.best_epoch = epoch
                 self.patience_counter = 0
                 best_path = os.path.join(self.checkpoint_dir, "best_model.pt")
-                torch.save(
-                    {
-                        "epoch": epoch,
-                        "model_state_dict": self.model.state_dict(),
-                        "metrics": val_metrics.to_dict(),
-                        "history": self.history,
-                    },
-                    best_path,
-                )
+                self.save_checkpoint(best_path, epoch=epoch, val_metrics=val_metrics)
             else:
                 self.patience_counter += 1
-                if self.patience_counter >= self.early_stopping_patience:
-                    print(f"Early stopping triggered at epoch {epoch}.")
-                    break
 
-        # Save last checkpoint
+            # Save latest checkpoint at the end of every epoch for instant crash recovery
+            latest_path = os.path.join(self.checkpoint_dir, "latest_checkpoint.pt")
+            self.save_checkpoint(latest_path, epoch=epoch, val_metrics=val_metrics)
+
+            # Also maintain last_model.pt for backwards compatibility
+            last_path = os.path.join(self.checkpoint_dir, "last_model.pt")
+            self.save_checkpoint(last_path, epoch=epoch, val_metrics=val_metrics)
+
+            # Export metrics JSON & CSV dynamically after each epoch
+            self.export_metrics_json()
+            self.export_metrics_csv()
+
+            if self.patience_counter >= self.early_stopping_patience:
+                print(f"Early stopping triggered at epoch {epoch}.")
+                break
+
+        # Save last checkpoint if not saved yet (e.g. 0 epochs)
         last_path = os.path.join(self.checkpoint_dir, "last_model.pt")
-        latest_metrics_dict = self.history[-1] if self.history else {}
-        torch.save(
-            {
-                "epoch": epoch,
-                "model_state_dict": self.model.state_dict(),
-                "metrics": latest_metrics_dict,
-                "history": self.history,
-            },
-            last_path,
-        )
+        if not os.path.exists(last_path):
+            self.save_checkpoint(last_path, epoch=epoch)
 
-        # Export metrics JSON & CSV
+        # Final export of metrics JSON & CSV
         self.export_metrics_json()
         self.export_metrics_csv()
 

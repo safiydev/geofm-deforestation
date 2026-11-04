@@ -7,6 +7,7 @@ spatial block cross-validation, and compound focal-tversky loss functions.
 import argparse
 import os
 import sys
+import numpy as np
 import torch
 from torch.utils.data import DataLoader, Subset
 
@@ -46,6 +47,8 @@ def parse_args():
     parser.add_argument("--tversky-beta", type=float, default=0.7, help="Tversky FN penalty weight (default: 0.7)")
     parser.add_argument("--num-samples", type=int, default=1000, help="Target dataset size for training")
     parser.add_argument("--checkpoint-dir", type=str, default="./checkpoints", help="Output directory")
+    parser.add_argument("--resume", action="store_true", help="Resume training from the latest checkpoint in --checkpoint-dir if available")
+    parser.add_argument("--resume-from", type=str, default=None, help="Explicit path to a checkpoint file (.pt) to resume from")
     parser.add_argument("--data-dir", type=str, default=None, help="Directory containing cached .npz chips")
     parser.add_argument("--cache-dir", type=str, default=None, help="Alias for --data-dir")
     parser.add_argument("--force-generate", action="store_true", help="Force regenerate synthetic data")
@@ -153,15 +156,46 @@ def main():
         dataset.transform = augmentor
         print("   ✓ D4 Dihedral group & radiometric jitter augmentation active.")
 
-    splitter = SpatialBlockSplitter(grid_size_deg=0.1, train_ratio=0.7, val_ratio=0.3, test_ratio=0.0)
-    train_idx, val_idx, _ = splitter.split(dataset)
+    # Split management: restore persistent spatial split when resuming to prevent data leakage across restarts
+    os.makedirs(args.checkpoint_dir, exist_ok=True)
+    train_indices_file = os.path.join(args.checkpoint_dir, "train_indices.npy")
+    val_indices_file = os.path.join(args.checkpoint_dir, "val_indices.npy")
 
-    # Class balance filter on train split
-    if args.class_balance and len(train_idx) > 4:
-        raw_train_sub = Subset(dataset, train_idx)
-        balanced_sub_idx = filter_class_balance(raw_train_sub, target_pos_ratio=0.70, min_pos_pct=5.0)
-        train_idx = [train_idx[i] for i in balanced_sub_idx]
-        print(f"   ✓ Class balance filter applied: {len(train_idx)} training chips selected.")
+    should_restore_split = (args.resume or args.resume_from) and os.path.exists(train_indices_file) and os.path.exists(val_indices_file)
+    train_idx, val_idx = None, None
+
+    if should_restore_split:
+        try:
+            train_idx = np.load(train_indices_file).tolist()
+            val_idx = np.load(val_indices_file).tolist()
+            max_idx = max(max(train_idx, default=0), max(val_idx, default=0))
+            if max_idx >= len(dataset):
+                print(f"   ⚠️ Saved split indices exceed dataset size ({max_idx} >= {len(dataset)}). Recomputing split...")
+                train_idx, val_idx = None, None
+            else:
+                print(f"   ✓ Restored persistent spatial split from {args.checkpoint_dir}: {len(train_idx)} train, {len(val_idx)} val chips.")
+        except Exception as e:
+            print(f"   ⚠️ Warning: Failed to load existing split indices ({e}). Recomputing spatial split...")
+            train_idx, val_idx = None, None
+
+    if train_idx is None or val_idx is None:
+        splitter = SpatialBlockSplitter(grid_size_deg=0.1, train_ratio=0.7, val_ratio=0.3, test_ratio=0.0)
+        train_idx, val_idx, _ = splitter.split(dataset)
+
+        # Class balance filter on train split
+        if args.class_balance and len(train_idx) > 4:
+            raw_train_sub = Subset(dataset, train_idx)
+            balanced_sub_idx = filter_class_balance(raw_train_sub, target_pos_ratio=0.70, min_pos_pct=5.0)
+            train_idx = [train_idx[i] for i in balanced_sub_idx]
+            print(f"   ✓ Class balance filter applied: {len(train_idx)} training chips selected.")
+
+        # Save indices for persistent resume capability
+        try:
+            np.save(train_indices_file, np.array(train_idx, dtype=np.int64))
+            np.save(val_indices_file, np.array(val_idx, dtype=np.int64))
+            print(f"   💾 Saved persistent spatial split to: {args.checkpoint_dir}")
+        except Exception as e:
+            print(f"   ⚠️ Warning: Could not save split indices to {args.checkpoint_dir}: {e}")
 
     train_sub = Subset(dataset, train_idx)
     val_sub = Subset(dataset, val_idx)
@@ -252,8 +286,39 @@ def main():
         gradient_accumulation_steps=args.grad_accum_steps,
     )
 
-    # 7. Run Training Loop
-    history = trainer.fit(train_loader, val_loader, epochs=args.epochs)
+    # 7. Checkpoint Resumption (Crash recovery & runtime reconnect support)
+    start_epoch = 1
+    if args.resume_from or args.resume:
+        checkpoint_path = None
+        if args.resume_from:
+            checkpoint_path = args.resume_from
+        else:
+            # Check latest_checkpoint.pt first, then last_model.pt, then best_model.pt
+            for candidate in ("latest_checkpoint.pt", "last_model.pt", "best_model.pt"):
+                p = os.path.join(args.checkpoint_dir, candidate)
+                if os.path.isfile(p):
+                    checkpoint_path = p
+                    break
+
+        if checkpoint_path and os.path.isfile(checkpoint_path):
+            print(f"\n🔄 Resuming from checkpoint: {checkpoint_path}")
+            resumed_epoch = trainer.load_checkpoint(checkpoint_path)
+            start_epoch = resumed_epoch + 1
+            if start_epoch > args.epochs:
+                print(
+                    f"⚠️ Checkpoint completed {resumed_epoch} epochs, which already meets or exceeds "
+                    f"requested --epochs ({args.epochs})."
+                )
+                print(f"   To train further, specify a higher --epochs value (e.g. --epochs {resumed_epoch + 10}).")
+                return
+            print(f"🚀 Continuing training from Epoch {start_epoch} up to Epoch {args.epochs}...\n")
+        else:
+            if args.resume_from:
+                raise FileNotFoundError(f"Requested checkpoint to resume from does not exist: {args.resume_from}")
+            print(f"ℹ️ --resume flag specified, but no previous checkpoint found in {args.checkpoint_dir}. Starting fresh run from Epoch 1.\n")
+
+    # 8. Run Training Loop
+    history = trainer.fit(train_loader, val_loader, epochs=args.epochs, start_epoch=start_epoch)
     print("=" * 65)
     print(f"Training completed successfully! Best Validation IoU: {trainer.best_val_iou * 100:.2f}%")
     print(f"Checkpoints saved to: {os.path.abspath(args.checkpoint_dir)}")

@@ -267,3 +267,78 @@ def test_lazy_dataset_and_streaming_cache(tmp_path):
     # Second access must come from RAM cache without disk load
     cached_item = ram_cached_ds[0]
     assert cached_item["t1"].shape == (4, 16, 16)
+
+
+def test_checkpoint_save_and_load_resume(tmp_path):
+    """Test full per-epoch checkpointing and seamless training resumption."""
+    samples = generate_synthetic_dataset(num_samples=4, height=32, width=32)
+    dataset = GeospatialDeforestationDataset(samples)
+    train_loader = DataLoader(Subset(dataset, [0, 1]), batch_size=2)
+    val_loader = DataLoader(Subset(dataset, [2, 3]), batch_size=2)
+
+    ckpt_dir = tmp_path / "checkpoints"
+
+    # 1. Train Phase 1: 2 epochs
+    model = SiameseChangeDetector(in_channels=4, features=[8, 16, 32, 64])
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min")
+    trainer = DeforestationTrainer(
+        model=model,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        checkpoint_dir=str(ckpt_dir),
+        model_type="siamese",
+    )
+
+    history1 = trainer.fit(train_loader, val_loader, epochs=2)
+    assert len(history1) == 2
+    assert (ckpt_dir / "latest_checkpoint.pt").exists()
+    assert (ckpt_dir / "best_model.pt").exists()
+    assert (ckpt_dir / "latest_metrics.csv").exists()
+
+    # Verify contents of latest_checkpoint.pt
+    ckpt_data = torch.load(ckpt_dir / "latest_checkpoint.pt", map_location="cpu", weights_only=False)
+    assert ckpt_data["epoch"] == 2
+    assert "model_state_dict" in ckpt_data
+    assert "optimizer_state_dict" in ckpt_data
+    assert "scheduler_state_dict" in ckpt_data
+    assert "best_val_iou" in ckpt_data
+    assert len(ckpt_data["history"]) == 2
+
+    # 2. Train Phase 2: Resume in a brand new Trainer instance
+    model2 = SiameseChangeDetector(in_channels=4, features=[8, 16, 32, 64])
+    optimizer2 = torch.optim.AdamW(model2.parameters(), lr=1e-3)
+    scheduler2 = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer2, mode="min")
+    trainer2 = DeforestationTrainer(
+        model=model2,
+        optimizer=optimizer2,
+        scheduler=scheduler2,
+        checkpoint_dir=str(ckpt_dir),
+        model_type="siamese",
+    )
+
+    resumed_epoch = trainer2.load_checkpoint(str(ckpt_dir / "latest_checkpoint.pt"))
+    assert resumed_epoch == 2
+    assert len(trainer2.history) == 2
+    assert trainer2.best_val_iou == trainer.best_val_iou
+
+    # Resume for 2 more epochs (total 4)
+    history2 = trainer2.fit(train_loader, val_loader, epochs=4, start_epoch=resumed_epoch + 1)
+    assert len(history2) == 4
+    assert history2[2]["epoch"] == 3
+    assert history2[3]["epoch"] == 4
+
+
+def test_train_cli_resume_arg_parsing():
+    """Verify train_cli accepts --resume and --resume-from flags."""
+    from geofm.train_cli import parse_args
+    import sys
+
+    old_argv = sys.argv
+    try:
+        sys.argv = ["train_cli.py", "--resume", "--resume-from", "./checkpoints/latest_checkpoint.pt"]
+        args = parse_args()
+        assert args.resume is True
+        assert args.resume_from == "./checkpoints/latest_checkpoint.pt"
+    finally:
+        sys.argv = old_argv
