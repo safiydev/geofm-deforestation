@@ -3,33 +3,30 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>GeoFM: Geospatial AI for Deforestation Detection & EUDR Compliance</title>
-  <meta name="description" content="Empirical bitemporal satellite change detection and statutory EUDR Regulation (EU) 2023/1115 compliance engine fusing Sentinel-2 optical and Sentinel-1 SAR imagery.">
-  <meta property="og:title" content="GeoFM: Geospatial AI for Deforestation Detection & EUDR Compliance">
+  <title>GeoFM: Bitemporal Geospatial AI & EUDR Compliance Suite</title>
+  <meta name="description" content="Empirical bitemporal satellite change detection and statutory EUDR Regulation (EU) 2023/1115 compliance engine fusing Sentinel-2 optical and Sentinel-1 SAR radar.">
+  <meta property="og:title" content="GeoFM: Bitemporal Geospatial AI & EUDR Compliance">
   <meta property="og:description" content="Empirical bitemporal change detection across satellite time frames with cloud-penetrating Sentinel-1 SAR and Olofsson area-adjusted accuracy.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://safiydev.github.io/geofm-deforestation/">
-  <meta name="twitter:card" content="summary_large_image">
   <meta name="theme-color" content="#090D14">
 
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 
   <style>
     :root {
       --bg: #090D14;
-      --card-bg: #111722;
-      --card-elevated: #182232;
+      --card-bg: #101622;
       --text: #F1F5F9;
       --text-muted: #94A3B8;
-      --border: rgba(255, 255, 255, 0.09);
+      --border: rgba(255, 255, 255, 0.08);
       --accent-emerald: #10B981;
       --accent-cyan: #06B6D4;
       --accent-crimson: #EF4444;
-      --accent-amber: #F59E0B;
       --font-sans: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      --font-mono: 'IBM Plex Mono', 'JetBrains Mono', monospace;
+      --font-mono: 'IBM Plex Mono', monospace;
     }
 
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -40,7 +37,6 @@
       font-family: var(--font-sans);
       line-height: 1.6;
       -webkit-font-smoothing: antialiased;
-      -moz-osx-font-smoothing: grayscale;
       overflow-x: hidden;
     }
 
@@ -51,7 +47,7 @@
       left: 1rem;
       background: var(--accent-cyan);
       color: #090D14;
-      padding: 8px 16px;
+      padding: 6px 14px;
       font-weight: 600;
       border-radius: 4px;
       z-index: 9999;
@@ -61,16 +57,15 @@
     .skip-link:focus { top: 1rem; }
 
     /* Themed Browser Surfaces */
-    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar { width: 7px; height: 7px; }
     ::-webkit-scrollbar-track { background: var(--bg); }
-    ::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.18); border-radius: 4px; }
-    ::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.28); }
+    ::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.16); border-radius: 3px; }
     ::selection { background: rgba(6, 182, 212, 0.35); color: #FFFFFF; }
     :focus-visible { outline: 2px solid var(--accent-cyan); outline-offset: 2px; }
 
-    /* Nav */
+    /* Header Nav */
     header {
-      background: rgba(9, 13, 20, 0.92);
+      background: rgba(9, 13, 20, 0.94);
       backdrop-filter: blur(12px);
       border-bottom: 1px solid var(--border);
       position: sticky;
@@ -79,7 +74,7 @@
       padding: 0.85rem 2rem;
     }
     .nav-container {
-      max-width: 1200px;
+      max-width: 1100px;
       margin: 0 auto;
       display: flex;
       justify-content: space-between;
@@ -88,23 +83,17 @@
     .brand-wrap {
       display: flex;
       align-items: center;
-      gap: 0.75rem;
+      gap: 0.65rem;
       text-decoration: none;
       color: inherit;
     }
-    .brand-icon-box {
-      width: 32px;
-      height: 32px;
-      border-radius: 6px;
-      background: rgba(6, 182, 212, 0.12);
-      border: 1px solid rgba(6, 182, 212, 0.3);
+    .brand-icon {
+      color: var(--accent-cyan);
       display: flex;
       align-items: center;
-      justify-content: center;
-      color: var(--accent-cyan);
     }
     .brand-title {
-      font-size: 1.15rem;
+      font-size: 1.1rem;
       font-weight: 700;
       letter-spacing: -0.01em;
       color: #FFFFFF;
@@ -117,71 +106,71 @@
     .nav-links a {
       color: var(--text-muted);
       text-decoration: none;
-      font-size: 0.88rem;
+      font-size: 0.86rem;
       font-weight: 500;
       transition: color 0.15s;
     }
     .nav-links a:hover, .nav-links a:focus { color: var(--text); }
 
     .btn-github {
-      background: rgba(255, 255, 255, 0.08);
+      background: rgba(255, 255, 255, 0.06);
       border: 1px solid var(--border);
       color: #FFFFFF;
-      padding: 6px 14px;
-      border-radius: 6px;
-      font-size: 0.82rem;
+      padding: 5px 12px;
+      border-radius: 5px;
+      font-size: 0.80rem;
       font-weight: 600;
       display: inline-flex;
       align-items: center;
-      gap: 0.5rem;
+      gap: 0.45rem;
       text-decoration: none;
       transition: background 0.15s;
     }
-    .btn-github:hover { background: rgba(255, 255, 255, 0.14); }
+    .btn-github:hover { background: rgba(255, 255, 255, 0.12); }
 
     /* Hero Section */
     .hero {
-      padding: 5rem 2rem 3.5rem;
-      max-width: 1200px;
+      padding: 4.5rem 2rem 3rem;
+      max-width: 1100px;
       margin: 0 auto;
       text-align: center;
     }
     .hero h1 {
-      font-size: clamp(2.2rem, 5vw, 3.4rem);
+      font-size: clamp(2.1rem, 4.2vw, 3.2rem);
       font-weight: 700;
       letter-spacing: -0.03em;
-      line-height: 1.18;
-      margin-bottom: 1.25rem;
+      line-height: 1.16;
+      margin-bottom: 1.15rem;
       color: #FFFFFF;
-      max-width: 950px;
+      max-width: 900px;
       margin-left: auto;
       margin-right: auto;
     }
     .hero p {
-      font-size: 1.15rem;
+      font-size: 1.1rem;
       color: var(--text-muted);
-      max-width: 820px;
-      margin: 0 auto 2.25rem;
-      line-height: 1.65;
+      max-width: 760px;
+      margin: 0 auto 1.85rem;
+      line-height: 1.6;
     }
     .hero-actions {
       display: flex;
       justify-content: center;
-      gap: 1rem;
+      gap: 0.85rem;
       flex-wrap: wrap;
-      margin-bottom: 2rem;
+      margin-bottom: 1.75rem;
     }
     .btn-primary {
       background: var(--accent-emerald);
       color: #090D14;
       font-weight: 600;
-      padding: 0.75rem 1.75rem;
-      border-radius: 6px;
+      padding: 0.7rem 1.6rem;
+      border-radius: 5px;
       text-decoration: none;
-      font-size: 0.95rem;
+      font-size: 0.92rem;
       display: inline-flex;
       align-items: center;
-      gap: 0.5rem;
+      gap: 0.45rem;
       transition: background 0.15s;
     }
     .btn-primary:hover { background: #059669; }
@@ -190,167 +179,151 @@
       border: 1px solid var(--border);
       color: var(--text);
       font-weight: 600;
-      padding: 0.75rem 1.75rem;
-      border-radius: 6px;
+      padding: 0.7rem 1.6rem;
+      border-radius: 5px;
       text-decoration: none;
-      font-size: 0.95rem;
+      font-size: 0.92rem;
       display: inline-flex;
       align-items: center;
-      gap: 0.5rem;
+      gap: 0.45rem;
       transition: background 0.15s;
     }
     .btn-outline:hover { background: rgba(255, 255, 255, 0.05); }
 
-    .badges-row {
-      display: flex;
-      justify-content: center;
-      gap: 0.5rem;
+    /* Streamlined Telemetry Metadata Bar */
+    .telemetry-bar {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.75rem;
       flex-wrap: wrap;
-      margin-bottom: 1.5rem;
+      justify-content: center;
+      background: rgba(255, 255, 255, 0.02);
+      border: 1px solid var(--border);
+      padding: 6px 16px;
+      border-radius: 20px;
+      font-family: var(--font-mono);
+      font-size: 0.76rem;
+      color: var(--text-muted);
     }
-    .badge-img { height: 20px; }
+    .telemetry-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--accent-emerald);
+      display: inline-block;
+    }
 
     /* Section Layouts */
     .section {
-      max-width: 1200px;
+      max-width: 1100px;
       margin: 0 auto;
-      padding: 4rem 2rem;
+      padding: 3.5rem 2rem;
     }
     .section-title {
-      font-size: 2rem;
+      font-size: 1.75rem;
       font-weight: 700;
-      margin-bottom: 0.75rem;
+      margin-bottom: 0.5rem;
       color: #FFFFFF;
       letter-spacing: -0.02em;
     }
     .section-desc {
       color: var(--text-muted);
-      margin-bottom: 2.5rem;
-      font-size: 1.05rem;
-      max-width: 780px;
+      margin-bottom: 2rem;
+      font-size: 0.98rem;
+      max-width: 720px;
       line-height: 1.6;
     }
 
-    /* Earth Observation Proof Showcase */
+    /* Earth Observation Showcase */
     .eo-showcase {
       background: var(--card-bg);
       border: 1px solid var(--border);
-      border-radius: 12px;
+      border-radius: 10px;
       overflow: hidden;
-      margin-top: 1rem;
+      margin-top: 1.75rem;
+      text-align: left;
     }
     .eo-header {
-      background: #0E1420;
-      padding: 1rem 1.5rem;
+      background: #0D121B;
+      padding: 0.85rem 1.25rem;
       border-bottom: 1px solid var(--border);
       display: flex;
       justify-content: space-between;
       align-items: center;
       flex-wrap: wrap;
       gap: 0.75rem;
-    }
-    .telemetry-row {
-      display: flex;
-      align-items: center;
-      gap: 1.25rem;
-      flex-wrap: wrap;
       font-family: var(--font-mono);
-      font-size: 0.78rem;
+      font-size: 0.76rem;
       color: var(--text-muted);
     }
-    .telemetry-tag {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.4rem;
-    }
-    .tag-val { color: var(--accent-cyan); font-weight: 600; }
-    .tag-val-alert { color: var(--accent-crimson); font-weight: 600; }
+    .eo-tag-val { color: var(--accent-cyan); font-weight: 600; }
+    .eo-tag-alert { color: var(--accent-crimson); font-weight: 600; }
 
-    .eo-viewport-grid {
+    .eo-views-grid {
       display: grid;
       grid-template-columns: 1fr 1fr;
       gap: 1px;
       background: var(--border);
     }
-    @media (max-width: 800px) {
-      .eo-viewport-grid { grid-template-columns: 1fr; }
+    @media (max-width: 780px) {
+      .eo-views-grid { grid-template-columns: 1fr; }
     }
-    .eo-pane {
+    .eo-view-pane {
       background: #080C12;
-      padding: 1.5rem;
+      padding: 1.25rem;
       position: relative;
     }
-    .pane-label {
+    .eo-pane-label {
       position: absolute;
-      top: 1.25rem;
-      left: 1.25rem;
-      background: rgba(9, 13, 20, 0.85);
-      backdrop-filter: blur(6px);
+      top: 1rem;
+      left: 1rem;
+      background: rgba(9, 13, 20, 0.88);
       border: 1px solid var(--border);
-      padding: 4px 10px;
+      padding: 3px 8px;
       border-radius: 4px;
-      font-size: 0.78rem;
+      font-size: 0.74rem;
       font-family: var(--font-mono);
       font-weight: 600;
       color: var(--text);
       z-index: 2;
     }
-    .satellite-canvas-wrap {
+    .satellite-wrap {
       width: 100%;
-      height: 280px;
+      height: 250px;
       display: flex;
       align-items: center;
       justify-content: center;
       background: #06090E;
       border-radius: 6px;
-      overflow: hidden;
-      border: 1px solid rgba(255, 255, 255, 0.05);
-      padding: 12px;
+      padding: 10px;
     }
-    .satellite-svg {
-      width: 100%;
-      height: 100%;
-      display: block;
-    }
+    .satellite-svg { width: 100%; height: 100%; display: block; }
 
     .eo-footer {
-      background: #0D131E;
+      background: #0D121B;
       border-top: 1px solid var(--border);
-      padding: 1rem 1.5rem;
+      padding: 0.85rem 1.25rem;
       display: flex;
       justify-content: space-between;
       align-items: center;
       flex-wrap: wrap;
-      gap: 1rem;
-      font-size: 0.84rem;
-    }
-    .eo-status {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      color: var(--text);
-      font-weight: 500;
-    }
-    .status-dot {
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
-      background: var(--accent-crimson);
-      display: inline-block;
+      gap: 0.75rem;
+      font-size: 0.80rem;
+      font-family: var(--font-mono);
     }
 
-    /* Grids & Refined Cards */
+    /* Grids & Cards */
     .grid-3 {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-      gap: 1.5rem;
+      grid-template-columns: repeat(auto-fit, minmax(310px, 1fr));
+      gap: 1.25rem;
     }
     .grid-2 {
       display: grid;
       grid-template-columns: 1fr 1fr;
-      gap: 1.75rem;
+      gap: 1.25rem;
     }
-    @media (max-width: 900px) {
+    @media (max-width: 820px) {
       .grid-2 { grid-template-columns: 1fr; }
     }
 
@@ -358,141 +331,124 @@
       background: var(--card-bg);
       border: 1px solid var(--border);
       border-radius: 8px;
-      padding: 1.75rem;
+      padding: 1.4rem;
       display: flex;
       flex-direction: column;
     }
-    /* Fixed: Inline Header Row eliminates icon-tile-stack slop */
     .card-header-row {
       display: flex;
       align-items: center;
-      gap: 0.75rem;
-      margin-bottom: 0.85rem;
+      gap: 0.65rem;
+      margin-bottom: 0.65rem;
     }
     .card-header-icon {
       color: var(--accent-cyan);
       display: inline-flex;
-      align-items: center;
-      justify-content: center;
       flex-shrink: 0;
     }
     .card-header-row h3 {
-      font-size: 1.15rem;
+      font-size: 1.05rem;
       font-weight: 600;
       color: #FFFFFF;
       letter-spacing: -0.01em;
     }
     .card p {
-      font-size: 0.92rem;
+      font-size: 0.88rem;
       color: var(--text-muted);
-      line-height: 1.6;
-      margin-bottom: 1rem;
+      line-height: 1.55;
+      margin-bottom: 0.85rem;
       flex-grow: 1;
     }
     .card-meta {
       font-family: var(--font-mono);
-      font-size: 0.78rem;
+      font-size: 0.74rem;
       color: var(--accent-cyan);
       border-top: 1px solid var(--border);
-      padding-top: 0.75rem;
+      padding-top: 0.65rem;
     }
 
-    /* Pipeline Architecture Box */
-    .pipeline-diagram {
-      background: #0A0F17;
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 2rem 1.5rem;
-      margin-bottom: 2rem;
-    }
-    .pipeline-stages {
+    /* Pipeline 4-Stage Workflow */
+    .pipeline-grid {
       display: grid;
       grid-template-columns: repeat(4, 1fr);
       gap: 1rem;
-      position: relative;
     }
     @media (max-width: 850px) {
-      .pipeline-stages { grid-template-columns: 1fr; }
+      .pipeline-grid { grid-template-columns: 1fr 1fr; }
     }
-    .stage-item {
+    @media (max-width: 520px) {
+      .pipeline-grid { grid-template-columns: 1fr; }
+    }
+    .pipeline-step {
       background: var(--card-bg);
       border: 1px solid var(--border);
-      border-radius: 6px;
-      padding: 1.25rem;
+      border-radius: 8px;
+      padding: 1.35rem;
     }
-    .stage-pill {
-      font-family: var(--font-mono);
-      font-size: 0.72rem;
-      color: var(--accent-cyan);
-      text-transform: uppercase;
-      font-weight: 600;
-      margin-bottom: 0.4rem;
-    }
-    .stage-title {
-      font-size: 0.98rem;
+    .pipeline-step h3 {
+      font-size: 1rem;
       font-weight: 600;
       color: #FFFFFF;
       margin-bottom: 0.5rem;
     }
-    .stage-desc {
-      font-size: 0.82rem;
+    .pipeline-step p {
+      font-size: 0.84rem;
       color: var(--text-muted);
-      line-height: 1.5;
+      line-height: 1.55;
     }
 
-    /* EUDR Specification Table */
+    /* EUDR Table */
     .eudr-table-wrap {
       overflow-x: auto;
-      margin-bottom: 2rem;
+      margin-bottom: 1.5rem;
     }
     .eudr-table {
       width: 100%;
       border-collapse: separate;
       border-spacing: 0;
       text-align: left;
-      font-size: 0.9rem;
+      font-size: 0.88rem;
       border: 1px solid var(--border);
       border-radius: 8px;
       overflow: hidden;
     }
     .eudr-table th {
-      background: #0E1420;
-      padding: 0.85rem 1.25rem;
+      background: #0D121B;
+      padding: 0.75rem 1.15rem;
       color: #FFFFFF;
       font-weight: 600;
       border-bottom: 1px solid var(--border);
       font-family: var(--font-mono);
-      font-size: 0.80rem;
+      font-size: 0.78rem;
       text-transform: uppercase;
     }
     .eudr-table td {
-      padding: 0.95rem 1.25rem;
+      padding: 0.85rem 1.15rem;
       border-bottom: 1px solid var(--border);
       color: var(--text-muted);
       vertical-align: top;
     }
     .eudr-table tr:last-child td { border-bottom: none; }
     .eudr-table td strong { color: var(--text); }
-    .status-badge-statutory {
+    .status-badge {
       display: inline-flex;
       align-items: center;
-      gap: 0.35rem;
       background: rgba(16, 185, 129, 0.12);
       border: 1px solid rgba(16, 185, 129, 0.28);
       color: var(--accent-emerald);
-      padding: 2px 8px;
+      padding: 2px 7px;
       border-radius: 4px;
       font-family: var(--font-mono);
-      font-size: 0.75rem;
+      font-size: 0.72rem;
       font-weight: 600;
     }
 
-    /* Interactive Simulator */
+    /* Simulator */
     .sim-box {
       background: var(--card-bg);
       border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 2rem;
+      border-radius: 8px;
+      padding: 1.75rem;
     }
     .slider-row {
       display: flex;
@@ -500,16 +456,12 @@
       justify-content: space-between;
       gap: 1.5rem;
       flex-wrap: wrap;
-      margin-bottom: 2rem;
+      margin-bottom: 1.5rem;
     }
-    .sim-label {
-      font-size: 0.95rem;
-      font-weight: 600;
-      color: var(--text);
-    }
+    .sim-label { font-size: 0.92rem; font-weight: 600; color: var(--text); }
     .sim-slider-ctl {
       flex: 1;
-      max-width: 320px;
+      max-width: 300px;
       height: 6px;
       background: rgba(255, 255, 255, 0.12);
       border-radius: 3px;
@@ -519,50 +471,48 @@
     .sim-metrics {
       display: grid;
       grid-template-columns: repeat(4, 1fr);
-      gap: 1rem;
+      gap: 0.85rem;
     }
-    @media (max-width: 700px) {
+    @media (max-width: 650px) {
       .sim-metrics { grid-template-columns: 1fr 1fr; }
     }
     .sim-metric {
-      background: rgba(255, 255, 255, 0.03);
+      background: rgba(255, 255, 255, 0.02);
       border: 1px solid var(--border);
       border-radius: 6px;
-      padding: 1.25rem 1rem;
+      padding: 1rem 0.75rem;
       text-align: center;
     }
     .sim-metric .m-label {
-      font-size: 0.72rem;
+      font-size: 0.70rem;
       color: var(--text-muted);
       text-transform: uppercase;
       font-weight: 600;
-      letter-spacing: 0.03em;
     }
     .sim-metric .m-val {
-      font-size: 1.65rem;
+      font-size: 1.5rem;
       font-weight: 700;
       color: #FFFFFF;
       font-family: var(--font-mono);
       font-variant-numeric: tabular-nums;
-      margin-top: 0.35rem;
+      margin-top: 0.25rem;
     }
 
-    /* Code Blocks & Copy UI */
+    /* Unified Code Box */
     .code-container {
       position: relative;
-      margin-bottom: 1.75rem;
     }
     .code-box {
       background: #06090E;
       border: 1px solid var(--border);
       border-radius: 8px;
-      padding: 1.25rem 1.5rem;
+      padding: 1.25rem 1.4rem;
       font-family: var(--font-mono);
-      font-size: 0.86rem;
+      font-size: 0.84rem;
       color: #A7F3D0;
       white-space: pre-wrap;
       word-break: break-all;
-      line-height: 1.65;
+      line-height: 1.6;
       overflow-x: auto;
     }
     .copy-btn {
@@ -573,7 +523,7 @@
       border: 1px solid var(--border);
       color: var(--text-muted);
       font-family: var(--font-sans);
-      font-size: 0.75rem;
+      font-size: 0.74rem;
       font-weight: 500;
       padding: 4px 10px;
       border-radius: 4px;
@@ -583,35 +533,19 @@
       gap: 0.35rem;
       transition: all 0.15s;
     }
-    .copy-btn:hover {
-      background: rgba(255, 255, 255, 0.15);
-      color: #FFFFFF;
-    }
+    .copy-btn:hover { background: rgba(255, 255, 255, 0.15); color: #FFFFFF; }
 
     /* Footer */
     footer {
       border-top: 1px solid var(--border);
-      padding: 3rem 2rem;
+      padding: 2.5rem 2rem;
       text-align: center;
       color: var(--text-muted);
-      font-size: 0.88rem;
+      font-size: 0.84rem;
       background: #06090E;
     }
     footer a { color: var(--accent-cyan); text-decoration: none; }
     footer a:hover { text-decoration: underline; }
-
-    /* Screen Reader Only Utility */
-    .sr-only {
-      position: absolute;
-      width: 1px;
-      height: 1px;
-      padding: 0;
-      margin: -1px;
-      overflow: hidden;
-      clip: rect(0, 0, 0, 0);
-      white-space: nowrap;
-      border-width: 0;
-    }
   </style>
 </head>
 <body>
@@ -622,21 +556,21 @@
   <header>
     <div class="nav-container">
       <a href="#" class="brand-wrap">
-        <div class="brand-icon-box">
-          <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <span class="brand-icon" aria-hidden="true">
+          <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" focusable="false">
             <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
           </svg>
-        </div>
-        <div class="brand-title">GeoFM</div>
+        </span>
+        <span class="brand-title">GeoFM</span>
       </a>
       <nav class="nav-links">
-        <a href="#studio">Web Studio</a>
-        <a href="#pipeline">Optical+SAR Pipeline</a>
-        <a href="#eudr">EUDR Engine</a>
-        <a href="#simulation">Threshold Sweep</a>
+        <a href="#studio">Studio</a>
+        <a href="#pipeline">Pipeline</a>
+        <a href="#eudr">EUDR</a>
+        <a href="#simulation">Thresholds</a>
         <a href="#quickstart">Quickstart</a>
         <a href="https://github.com/safiydev/geofm-deforestation" target="_blank" rel="noopener noreferrer" class="btn-github">
-          <svg width="16" height="16" fill="currentColor" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <svg width="15" height="15" fill="currentColor" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
             <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/>
           </svg>
           GitHub
@@ -646,298 +580,229 @@
   </header>
 
   <main id="main-content">
-    <!-- Hero Section (No eyebrow/kicker per craft floor) -->
+    <!-- Hero Section -->
     <section class="hero">
       <h1>Detecting Forest Canopy Loss Across Satellite Time Frames</h1>
       <p>
-        GeoFM does not forecast speculative future deforestation. Instead, it performs precision <strong>bitemporal change detection</strong>—comparing dual satellite observation windows (T1 baseline vs T2 monitoring) using Sentinel-2 optical and Sentinel-1 cloud-penetrating SAR to detect verified canopy clear-cuts, illegal access corridors, and degradation for statutory Regulation (EU) 2023/1115 compliance.
+        GeoFM performs empirical <strong>bitemporal change detection</strong>—comparing dual observation windows (T1 baseline vs T2 monitoring) with Sentinel-2 optical and Sentinel-1 cloud-penetrating SAR to detect verified clear-cuts and degradation for EUDR Regulation (EU) 2023/1115 compliance.
       </p>
       <div class="hero-actions">
         <a href="#studio" class="btn-primary">
-          <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <svg width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
             <polygon points="5 3 19 12 5 21 5 3"></polygon>
           </svg>
-          Explore Web Studio Tour
+          Explore Studio
         </a>
         <a href="#quickstart" class="btn-outline">
-          <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <svg width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
             <polyline points="4 17 10 11 4 5"></polyline>
             <line x1="12" y1="19" x2="20" y2="19"></line>
           </svg>
-          Install Local Studio
+          Install CLI
         </a>
       </div>
-      <div class="badges-row">
-        <img src="https://img.shields.io/badge/Python-3.9+-3776AB?style=flat&logo=python&logoColor=white" alt="Python version 3.9+" class="badge-img">
-        <img src="https://img.shields.io/badge/PyTorch-2.0+-EE4C2C?style=flat&logo=pytorch&logoColor=white" alt="PyTorch 2.0+" class="badge-img">
-        <img src="https://img.shields.io/badge/FastAPI-0.100+-009688?style=flat&logo=fastapi&logoColor=white" alt="FastAPI 0.100+" class="badge-img">
-        <img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="Apache 2.0 License" class="badge-img">
-        <img src="https://img.shields.io/badge/Tests-94%20Passed-10B981.svg" alt="94 Passing Pytest Tests" class="badge-img">
+      
+      <!-- Distilled Integrated Telemetry Bar (Replaces 5 separate image badges) -->
+      <div class="telemetry-bar">
+        <span><span class="telemetry-dot"></span> 94 Passing Tests</span>
+        <span>&middot;</span>
+        <span>PyTorch 2.x</span>
+        <span>&middot;</span>
+        <span>FastAPI</span>
+        <span>&middot;</span>
+        <span>Apache 2.0</span>
       </div>
 
-      <!-- Earth Observation Visual Verification Showcase -->
+      <!-- Bitemporal Visual Verification Showcase -->
       <div class="eo-showcase">
         <div class="eo-header">
-          <div class="telemetry-row">
-            <span class="telemetry-tag">Scene: <span class="tag-val">Amazonas Basin (-3.4653° S, -62.2159° W)</span></span>
-            <span class="telemetry-tag">Sensor: <span class="tag-val">Sentinel-2 MSI (10m) + Sentinel-1 SAR C-Band</span></span>
-            <span class="telemetry-tag">EUDR Baseline: <span class="tag-val">2020-12-31 Cutoff Reference</span></span>
-          </div>
-          <div class="telemetry-row">
-            <span class="telemetry-tag">Detected Disturbance: <span class="tag-val-alert">14.28 ha (&gt;4ha Polygon Mandatory)</span></span>
-          </div>
+          <span>Scene: <strong class="eo-tag-val">Amazonas Basin (-3.4653° S, -62.2159° W)</strong></span>
+          <span>Sensors: <strong class="eo-tag-val">Sentinel-2 (10m) + Sentinel-1 SAR</strong></span>
+          <span>Alert: <strong class="eo-tag-alert">14.28 ha Disturbance (&gt;4ha Polygon)</strong></span>
         </div>
 
-        <div class="eo-viewport-grid">
+        <div class="eo-views-grid">
           <!-- Pane 1: T1 Baseline -->
-          <div class="eo-pane">
-            <div class="pane-label">T1 BASELINE: 2020-11-20 (Continuous Primary Canopy)</div>
-            <div class="satellite-canvas-wrap">
-              <svg class="satellite-svg" viewBox="0 0 500 280" fill="none" xmlns="http://www.w3.org/2000/svg" aria-label="Satellite false color image of intact forest canopy in 2020">
-                <rect width="500" height="280" fill="#0D2818"/>
-                <!-- River channel -->
-                <path d="M 0 160 C 120 180, 240 100, 340 120 C 420 140, 470 190, 500 210" stroke="#06B6D4" stroke-width="14" fill="none" opacity="0.8"/>
-                <!-- Forest Texture -->
-                <circle cx="80" cy="70" r="45" fill="#134E28" opacity="0.6"/>
+          <div class="eo-view-pane">
+            <div class="eo-pane-label">T1 BASELINE &middot; 2020-11-20</div>
+            <div class="satellite-wrap">
+              <svg class="satellite-svg" viewBox="0 0 480 240" fill="none" xmlns="http://www.w3.org/2000/svg" aria-label="Satellite image of intact forest canopy in 2020">
+                <rect width="480" height="240" fill="#0D2818"/>
+                <path d="M 0 140 C 110 160, 220 90, 320 110 C 390 125, 440 170, 480 190" stroke="#06B6D4" stroke-width="12" fill="none" opacity="0.8"/>
+                <circle cx="80" cy="60" r="45" fill="#134E28" opacity="0.6"/>
                 <circle cx="210" cy="50" r="55" fill="#155D30" opacity="0.7"/>
-                <circle cx="380" cy="80" r="60" fill="#134E28" opacity="0.6"/>
-                <circle cx="120" cy="220" r="40" fill="#114223" opacity="0.7"/>
-                <circle cx="280" cy="220" r="50" fill="#134E28" opacity="0.6"/>
-                <circle cx="430" cy="190" r="45" fill="#155D30" opacity="0.5"/>
-                <!-- Coordinate Graticule -->
-                <line x1="125" y1="0" x2="125" y2="280" stroke="#FFFFFF" stroke-opacity="0.06" stroke-dasharray="4 4"/>
-                <line x1="250" y1="0" x2="250" y2="280" stroke="#FFFFFF" stroke-opacity="0.06" stroke-dasharray="4 4"/>
-                <line x1="375" y1="0" x2="375" y2="280" stroke="#FFFFFF" stroke-opacity="0.06" stroke-dasharray="4 4"/>
-                <line x1="0" y1="140" x2="500" y2="140" stroke="#FFFFFF" stroke-opacity="0.06" stroke-dasharray="4 4"/>
-                <text x="15" y="265" fill="#94A3B8" font-family="'IBM Plex Mono', monospace" font-size="11">S2A_MSIL2A_20201120 | B4-B3-B2 NDVI: 0.84</text>
+                <circle cx="370" cy="70" r="60" fill="#134E28" opacity="0.6"/>
+                <circle cx="130" cy="190" r="40" fill="#114223" opacity="0.7"/>
+                <circle cx="290" cy="190" r="50" fill="#134E28" opacity="0.6"/>
+                <line x1="240" y1="0" x2="240" y2="240" stroke="#FFFFFF" stroke-opacity="0.06" stroke-dasharray="4 4"/>
+                <line x1="0" y1="120" x2="480" y2="120" stroke="#FFFFFF" stroke-opacity="0.06" stroke-dasharray="4 4"/>
+                <text x="14" y="226" fill="#94A3B8" font-family="'IBM Plex Mono', monospace" font-size="10">S2A_20201120 &middot; Intact Primary Canopy (NDVI: 0.84)</text>
               </svg>
             </div>
           </div>
 
-          <!-- Pane 2: T2 Monitoring + Detected Deforestation Mask -->
-          <div class="eo-pane">
-            <div class="pane-label">T2 MONITORING: 2023-04-15 (Detected Disturbance Overlay)</div>
-            <div class="satellite-canvas-wrap">
-              <svg class="satellite-svg" viewBox="0 0 500 280" fill="none" xmlns="http://www.w3.org/2000/svg" aria-label="Satellite image showing detected deforestation clearcut mask in 2023">
-                <rect width="500" height="280" fill="#0D2818"/>
-                <!-- River channel -->
-                <path d="M 0 160 C 120 180, 240 100, 340 120 C 420 140, 470 190, 500 210" stroke="#06B6D4" stroke-width="14" fill="none" opacity="0.8"/>
-                <!-- Intact Forest remnants -->
-                <circle cx="80" cy="70" r="45" fill="#134E28" opacity="0.6"/>
-                <circle cx="380" cy="80" r="60" fill="#134E28" opacity="0.6"/>
-                <circle cx="120" cy="220" r="40" fill="#114223" opacity="0.7"/>
-                <!-- Detected Deforestation Polygon & Road Network (Translucent Red Overlay) -->
-                <path d="M 170 30 L 260 40 L 275 110 L 230 130 L 160 100 Z" fill="#EF4444" fill-opacity="0.6" stroke="#EF4444" stroke-width="2"/>
-                <path d="M 230 130 L 290 190 L 330 200 L 315 235 L 260 210 Z" fill="#EF4444" fill-opacity="0.6" stroke="#EF4444" stroke-width="2"/>
-                <path d="M 215 35 L 255 125 L 290 195 L 320 230" stroke="#F59E0B" stroke-width="3" stroke-dasharray="2 3" opacity="0.9"/>
-                <!-- Bounding Box Telemetry Indicator -->
-                <rect x="150" y="20" width="195" height="225" stroke="#EF4444" stroke-width="1.5" stroke-dasharray="6 4" fill="none"/>
-                <!-- Centroid Marker -->
-                <circle cx="245" cy="120" r="4" fill="#FFFFFF"/>
-                <circle cx="245" cy="120" r="8" stroke="#EF4444" stroke-width="1.5" fill="none"/>
-                <!-- Coordinate Graticule -->
-                <line x1="125" y1="0" x2="125" y2="280" stroke="#FFFFFF" stroke-opacity="0.06" stroke-dasharray="4 4"/>
-                <line x1="250" y1="0" x2="250" y2="280" stroke="#FFFFFF" stroke-opacity="0.06" stroke-dasharray="4 4"/>
-                <line x1="375" y1="0" x2="375" y2="280" stroke="#FFFFFF" stroke-opacity="0.06" stroke-dasharray="4 4"/>
-                <line x1="0" y1="140" x2="500" y2="140" stroke="#FFFFFF" stroke-opacity="0.06" stroke-dasharray="4 4"/>
-                <text x="15" y="265" fill="#EF4444" font-family="'IBM Plex Mono', monospace" font-size="11" font-weight="600">CONFIRMED LOSS: -78.4% NDVI | S1 SAR Backscatter Shift: +4.2 dB</text>
+          <!-- Pane 2: T2 Monitoring + Deforestation Mask -->
+          <div class="eo-view-pane">
+            <div class="eo-pane-label">T2 MONITORING &middot; 2023-04-15</div>
+            <div class="satellite-wrap">
+              <svg class="satellite-svg" viewBox="0 0 480 240" fill="none" xmlns="http://www.w3.org/2000/svg" aria-label="Satellite image showing detected deforestation mask in 2023">
+                <rect width="480" height="240" fill="#0D2818"/>
+                <path d="M 0 140 C 110 160, 220 90, 320 110 C 390 125, 440 170, 480 190" stroke="#06B6D4" stroke-width="12" fill="none" opacity="0.8"/>
+                <circle cx="80" cy="60" r="45" fill="#134E28" opacity="0.6"/>
+                <circle cx="370" cy="70" r="60" fill="#134E28" opacity="0.6"/>
+                <circle cx="130" cy="190" r="40" fill="#114223" opacity="0.7"/>
+                <!-- Detected Deforestation Polygon (Red Overlay) -->
+                <path d="M 160 30 L 250 40 L 265 100 L 220 120 L 150 90 Z" fill="#EF4444" fill-opacity="0.6" stroke="#EF4444" stroke-width="2"/>
+                <path d="M 220 120 L 280 170 L 320 180 L 305 210 L 250 190 Z" fill="#EF4444" fill-opacity="0.6" stroke="#EF4444" stroke-width="2"/>
+                <path d="M 205 35 L 245 115 L 280 175 L 310 205" stroke="#F59E0B" stroke-width="2.5" stroke-dasharray="2 3" opacity="0.9"/>
+                <circle cx="235" cy="110" r="5" stroke="#EF4444" stroke-width="1.5" fill="#FFFFFF"/>
+                <line x1="240" y1="0" x2="240" y2="240" stroke="#FFFFFF" stroke-opacity="0.06" stroke-dasharray="4 4"/>
+                <line x1="0" y1="120" x2="480" y2="120" stroke="#FFFFFF" stroke-opacity="0.06" stroke-dasharray="4 4"/>
+                <text x="14" y="226" fill="#EF4444" font-family="'IBM Plex Mono', monospace" font-size="10" font-weight="600">CANOPY LOSS: -78.4% NDVI &middot; S1 SAR Shift: +4.2 dB</text>
               </svg>
             </div>
           </div>
         </div>
 
         <div class="eo-footer">
-          <div class="eo-status">
-            <span class="status-dot"></span>
-            <span>Statutory EUDR Non-Compliance Flagged (Deforestation verified after December 31, 2020 cutoff)</span>
-          </div>
-          <span style="font-family: var(--font-mono); color: var(--text-muted); font-size: 0.8rem;">
-            Olofsson Adjusted Accuracy: <strong>94.2%</strong> &plusmn; 2.4% (95% CI)
-          </span>
+          <span>EUDR Statutory Demarcation: <strong>December 31, 2020 Cutoff</strong></span>
+          <span>Olofsson Adjusted Accuracy: <strong>94.2%</strong> &plusmn; 2.4% (95% CI)</span>
         </div>
       </div>
     </section>
 
     <!-- Section 1: Studio Features -->
     <section id="studio" class="section">
-      <h2 class="section-title">Autonomous Control Room Web Studio</h2>
-      <p class="section-desc">Operate fully offline or deployed in production without cloud GPU session interruptions using our high-density FastAPI and Leaflet.js workstation.</p>
+      <h2 class="section-title">Autonomous Web Studio</h2>
+      <p class="section-desc">Run training, benchmarking, and compliance verification locally or on private GPU clusters via our dedicated FastAPI + Leaflet workstation.</p>
       
       <div class="grid-3">
-        <!-- Card 1 -->
         <div class="card">
           <div class="card-header-row">
             <span class="card-header-icon" aria-hidden="true">
-              <svg width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" focusable="false">
-                <line x1="4" y1="21" x2="4" y2="14"></line>
-                <line x1="4" y1="10" x2="4" y2="3"></line>
-                <line x1="12" y1="21" x2="12" y2="12"></line>
-                <line x1="12" y1="8" x2="12" y2="3"></line>
-                <line x1="20" y1="21" x2="20" y2="16"></line>
-                <line x1="20" y1="12" x2="20" y2="3"></line>
+              <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" focusable="false">
+                <line x1="4" y1="21" x2="4" y2="14"></line><line x1="4" y1="10" x2="4" y2="3"></line>
+                <line x1="12" y1="21" x2="12" y2="12"></line><line x1="12" y1="8" x2="12" y2="3"></line>
+                <line x1="20" y1="21" x2="20" y2="16"></line><line x1="20" y1="12" x2="20" y2="3"></line>
               </svg>
             </span>
             <h3>AI Training Studio</h3>
           </div>
-          <p>Configure Parameter-Efficient Fine-Tuning (LoRA rank=16, &alpha;=32), Focal + Tversky compound loss functions, and monitor real-time loss and IoU dual-axis convergence curves with live terminal log streaming.</p>
-          <div class="card-meta">ENGINE: PyTorch 2.x &middot; AMP FP16 &middot; LoRA PEFT</div>
+          <p>LoRA PEFT hyperparameters ($r=16, \alpha=32$), Focal + Tversky compound loss, and real-time loss/IoU convergence telemetry with live terminal logs.</p>
+          <div class="card-meta">PyTorch 2.x &middot; AMP FP16 &middot; LoRA</div>
         </div>
 
-        <!-- Card 2 -->
         <div class="card">
           <div class="card-header-row">
             <span class="card-header-icon" aria-hidden="true">
-              <svg width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" focusable="false">
+              <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" focusable="false">
                 <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
-                <line x1="3" y1="9" x2="21" y2="9"></line>
-                <line x1="9" y1="21" x2="9" y2="9"></line>
+                <line x1="3" y1="9" x2="21" y2="9"></line><line x1="9" y1="21" x2="9" y2="9"></line>
               </svg>
             </span>
-            <h3>Change Detection Benchmark</h3>
+            <h3>Benchmark Suite</h3>
           </div>
-          <p>Evaluate 2&times;2 pixel-level Confusion Matrix scorecards (True Positive, False Positive, False Negative, True Negative), IoU, F1/Dice score, and interactive 9-step threshold sensitivity sweep curves.</p>
-          <div class="card-meta">METRICS: Pixel Confusion &middot; IoU &middot; F1/Dice</div>
+          <p>2&times;2 pixel confusion matrix (TP, FP, FN, TN), IoU, F1/Dice score, and interactive 9-step threshold sensitivity trade-off analysis.</p>
+          <div class="card-meta">Pixel Confusion &middot; IoU &middot; F1 Score</div>
         </div>
 
-        <!-- Card 3 -->
         <div class="card">
           <div class="card-header-row">
             <span class="card-header-icon" aria-hidden="true">
-              <svg width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" focusable="false">
+              <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" focusable="false">
                 <circle cx="12" cy="12" r="10"></circle>
-                <line x1="22" y1="12" x2="18" y2="12"></line>
-                <line x1="6" y1="12" x2="2" y2="12"></line>
-                <line x1="12" y1="6" x2="12" y2="2"></line>
-                <line x1="12" y1="22" x2="12" y2="18"></line>
+                <line x1="22" y1="12" x2="18" y2="12"></line><line x1="6" y1="12" x2="2" y2="12"></line>
+                <line x1="12" y1="6" x2="12" y2="2"></line><line x1="12" y1="22" x2="12" y2="18"></line>
               </svg>
             </span>
-            <h3>Deep Bitemporal Chip Inspector</h3>
+            <h3>12-Layer Chip Inspector</h3>
           </div>
-          <p>Inspect all 12 spectral channels: T1 and T2 True Color RGB, Color Infrared (CIR), NDVI vegetation index, Sentinel-1 SAR radar backscatter, Hansen GFC ground-truth reference, model probability heatmaps, and pixel error diff maps.</p>
-          <div class="card-meta">INSPECTOR: 12 Spectral Layers &middot; 256&times;256 Chips</div>
+          <p>Inspect multi-spectral channels: T1/T2 RGB, Color Infrared (CIR), NDVI vegetation index, Sentinel-1 SAR backscatter, Hansen ground truth, and residual error maps.</p>
+          <div class="card-meta">12 Multi-Spectral Channels &middot; 256&times;256</div>
         </div>
 
-        <!-- Card 4 -->
         <div class="card">
           <div class="card-header-row">
             <span class="card-header-icon" aria-hidden="true">
-              <svg width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" focusable="false">
+              <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" focusable="false">
                 <polygon points="1 6 1 22 8 18 16 22 23 18 23 2 16 6 8 2 1 6"></polygon>
-                <line x1="8" y1="2" x2="8" y2="18"></line>
-                <line x1="16" y1="6" x2="16" y2="22"></line>
+                <line x1="8" y1="2" x2="8" y2="18"></line><line x1="16" y1="6" x2="16" y2="22"></line>
               </svg>
             </span>
             <h3>Geospatial Disturbance Map</h3>
           </div>
-          <p>Interactive Leaflet dark satellite canvas featuring Minimum Mapping Unit (MMU) spatial filtering, severity-graded polygon clusters (Critical, High, Medium), and direct GeoJSON coordinate export for GIS workbenches.</p>
-          <div class="card-meta">MAPPING: Leaflet.js &middot; MMU Filtering &middot; GeoJSON</div>
+          <p>Interactive Leaflet basemap with Minimum Mapping Unit (MMU) spatial filtering, severity-graded polygon clusters, and GeoJSON export.</p>
+          <div class="card-meta">Leaflet.js &middot; MMU Filtering &middot; GeoJSON</div>
         </div>
 
-        <!-- Card 5 (Distinctive certified document icon, not duplicate shield) -->
         <div class="card">
           <div class="card-header-row">
             <span class="card-header-icon" aria-hidden="true">
-              <svg width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" focusable="false">
+              <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" focusable="false">
                 <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-                <polyline points="14 2 14 8 20 8"></polyline>
-                <path d="M9 15l2 2 4-4"></path>
+                <polyline points="14 2 14 8 20 8"></polyline><path d="M9 15l2 2 4-4"></path>
               </svg>
             </span>
             <h3>EUDR Due Diligence</h3>
           </div>
-          <p>Verify plot boundaries against the statutory December 31, 2020 baseline cutoff across Annex I commodities, enforce mandatory polygon coordinates for plots &gt;4ha, and run Olofsson et al. (2014) stratified area accuracy estimation.</p>
-          <div class="card-meta">STATUTORY: EU 2023/1115 &middot; Olofsson 95% CI</div>
+          <p>Enforce the December 31, 2020 legal cutoff, Annex I commodity tags, mandatory &gt;4ha polygon coordinates, and Olofsson stratified accuracy.</p>
+          <div class="card-meta">EU 2023/1115 &middot; Olofsson 95% CI</div>
         </div>
 
-        <!-- Card 6 -->
         <div class="card">
           <div class="card-header-row">
             <span class="card-header-icon" aria-hidden="true">
-              <svg width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" focusable="false">
+              <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" focusable="false">
                 <ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>
-                <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path>
-                <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path>
+                <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path>
               </svg>
             </span>
-            <h3>Checkpoints & Model Zoo</h3>
+            <h3>Model Zoo & Checkpoints</h3>
           </div>
-          <p>Direct browser downloads of saved PyTorch weights, in-memory model hot-swapping between Siamese and ViT architectures, manual custom checkpoint loading, and balanced 70:30 synthetic chip caching.</p>
-          <div class="card-meta">REGISTRY: In-Memory Hot-Swap &middot; .pt Checkpoints</div>
+          <p>In-memory hot-swapping between Siamese and ViT architectures, manual checkpoint loading, and balanced 70:30 synthetic chip caching.</p>
+          <div class="card-meta">In-Memory Hot-Swap &middot; .pt Weights</div>
         </div>
       </div>
     </section>
 
-    <!-- Section 2: Pipeline Architecture (#pipeline) -->
+    <!-- Section 2: Pipeline Architecture -->
     <section id="pipeline" class="section">
-      <h2 class="section-title">Optical + SAR Multimodal Fusion Pipeline</h2>
-      <p class="section-desc">Deforestation in equatorial rainforests is frequently obscured by cloud cover. GeoFM pairs Sentinel-2 optical multi-spectral data with Sentinel-1 C-band synthetic aperture radar to deliver reliable, weather-independent change detection.</p>
+      <h2 class="section-title">Optical + SAR Multimodal Pipeline</h2>
+      <p class="section-desc">Sentinel-1 C-band microwaves (5.405 GHz) penetrate persistent tropical cloud decks, while Sentinel-2 optical captures fine canopy reflectance.</p>
 
-      <div class="pipeline-diagram">
-        <div class="pipeline-stages">
-          <div class="stage-item">
-            <div class="stage-pill">STAGE 01 &middot; INGESTION</div>
-            <div class="stage-title">Bitemporal Ingestion</div>
-            <div class="stage-desc">Co-registered optical (B2, B3, B4, B8, B11, B12) and SAR (VV, VH backscatter) chips sampled at T1 baseline and T2 monitoring intervals.</div>
-          </div>
-
-          <div class="stage-item">
-            <div class="stage-pill">STAGE 02 &middot; SIAMESE BACKBONE</div>
-            <div class="stage-title">Dual-Branch Siamese Encoder</div>
-            <div class="stage-desc">Weight-shared ResNet / ViT branches extract aligned latent manifold embeddings from both observation windows without seasonal bias.</div>
-          </div>
-
-          <div class="stage-item">
-            <div class="stage-pill">STAGE 03 &middot; FUSION BOTTLENECK</div>
-            <div class="stage-title">Residual Difference Fusion</div>
-            <div class="stage-desc">Explicit spatial-temporal difference tensor computation combining absolute delta and directional feature transitions.</div>
-          </div>
-
-          <div class="stage-item">
-            <div class="stage-pill">STAGE 04 &middot; SEGMENTATION</div>
-            <div class="stage-title">Mask & Uncertainty Head</div>
-            <div class="stage-desc">Lightweight decoder outputs calibrated per-pixel change probability maps and polygon boundary representations.</div>
-          </div>
-        </div>
-      </div>
-
-      <div class="grid-2">
-        <div class="card">
-          <div class="card-header-row">
-            <span class="card-header-icon" aria-hidden="true">
-              <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" focusable="false">
-                <path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path>
-              </svg>
-            </span>
-            <h3>Synthetic Aperture Radar (SAR) Cloud Penetration</h3>
-          </div>
-          <p>Sentinel-1 C-band microwaves (5.405 GHz) pass through dense cloud decks, smoke, and nighttime darkness. SAR cross-polarization (VH) is sensitive to forest canopy volume scattering; canopy removal causes sharp drops in backscatter volume, providing empirical confirmation even during monsoons.</p>
+      <div class="pipeline-grid">
+        <div class="pipeline-step">
+          <h3>Multimodal Ingestion</h3>
+          <p>Co-registered Sentinel-2 (B2-B4, B8, B11-B12) and Sentinel-1 SAR (VV/VH backscatter) chips sampled at T1 and T2 intervals.</p>
         </div>
 
-        <div class="card">
-          <div class="card-header-row">
-            <span class="card-header-icon" aria-hidden="true">
-              <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" focusable="false">
-                <circle cx="12" cy="12" r="3"></circle>
-                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
-              </svg>
-            </span>
-            <h3>LoRA Parameter-Efficient Adaptation</h3>
-          </div>
-          <p>By injecting low-rank decomposition matrices ($r=16, \alpha=32$) into attention projections, GeoFM fine-tunes foundation model weights using under 2% of the parameters of full backpropagation, preventing catastrophic forgetting and enabling consumer GPU training.</p>
+        <div class="pipeline-step">
+          <h3>Siamese Backbone</h3>
+          <p>Weight-shared dual-branch encoder extracts aligned latent embeddings from both windows with LoRA parameter-efficient adaptation.</p>
+        </div>
+
+        <div class="pipeline-step">
+          <h3>Residual Difference</h3>
+          <p>Spatial-temporal difference tensor computes absolute delta and directional feature transitions, isolating true physical canopy loss.</p>
+        </div>
+
+        <div class="pipeline-step">
+          <h3>Segmentation Head</h3>
+          <p>Lightweight decoder generates calibrated per-pixel change probability maps and polygon boundary representations.</p>
         </div>
       </div>
     </section>
 
-    <!-- Section 3: EUDR Statutory Compliance Engine (#eudr) -->
+    <!-- Section 3: EUDR Statutory Verification -->
     <section id="eudr" class="section">
-      <h2 class="section-title">EUDR Due Diligence & Statutory Verification</h2>
-      <p class="section-desc">Regulation (EU) 2023/1115 mandates rigorous proof that products entering the European Single Market originate from land free from deforestation after the statutory cutoff date.</p>
+      <h2 class="section-title">EUDR Statutory Compliance</h2>
+      <p class="section-desc">Regulation (EU) 2023/1115 mandates verifiable proof that commodities placed on the EU Single Market are deforestation-free after December 31, 2020.</p>
 
       <div class="eudr-table-wrap">
         <table class="eudr-table">
           <thead>
             <tr>
-              <th>Regulatory Requirement</th>
+              <th>Requirement</th>
               <th>Statutory Mandate</th>
               <th>GeoFM Verification Protocol</th>
               <th>Status</th>
@@ -945,73 +810,44 @@
           </thead>
           <tbody>
             <tr>
-              <td><strong>Baseline Cutoff</strong></td>
-              <td>December 31, 2020 strict legal demarcation</td>
-              <td>Dual-temporal comparison comparing T1 (&le; Dec 31, 2020) against current T2 monitoring window</td>
-              <td><span class="status-badge-statutory">&check; ENFORCED</span></td>
+              <td><strong>Cutoff Date</strong></td>
+              <td>December 31, 2020 strict baseline</td>
+              <td>Dual-temporal comparison against &le; 2020 baseline archive</td>
+              <td><span class="status-badge">&check; ENFORCED</span></td>
             </tr>
             <tr>
-              <td><strong>Annex I Commodities</strong></td>
+              <td><strong>Annex I Scope</strong></td>
               <td>Cattle, Cocoa, Coffee, Oil Palm, Rubber, Soya, Wood</td>
-              <td>Commodity metadata validation and risk-weighted classification models for certified supply chains</td>
-              <td><span class="status-badge-statutory">&check; SUPPORTED</span></td>
+              <td>Automated commodity metadata classification and audit logging</td>
+              <td><span class="status-badge">&check; SUPPORTED</span></td>
             </tr>
             <tr>
-              <td><strong>Plot Geolocation</strong></td>
-              <td>&gt;4 ha requires polygon; &le;4 ha requires single point</td>
-              <td>Automated convex hull polygon generator emitting WGS84 coordinates with 6 decimal places</td>
-              <td><span class="status-badge-statutory">&check; VALIDATED</span></td>
+              <td><strong>Geolocation</strong></td>
+              <td>&gt;4 ha requires polygon; &le;4 ha requires point</td>
+              <td>Convex hull polygon generator emitting 6-decimal WGS84 coordinates</td>
+              <td><span class="status-badge">&check; VALIDATED</span></td>
             </tr>
             <tr>
-              <td><strong>Unbiased Area Estimation</strong></td>
-              <td>Mandatory statistical rigor for reporting accuracy</td>
-              <td>Olofsson et al. (2014) stratified error matrix adjusting pixel counts with 95% confidence intervals</td>
-              <td><span class="status-badge-statutory">&check; STATISTICAL</span></td>
+              <td><strong>Accuracy</strong></td>
+              <td>Statistically defensible area accounting</td>
+              <td>Olofsson et al. (2014) stratified error matrix with 95% confidence intervals</td>
+              <td><span class="status-badge">&check; STATISTICAL</span></td>
             </tr>
           </tbody>
         </table>
       </div>
-
-      <div class="grid-2">
-        <div class="card">
-          <div class="card-header-row">
-            <span class="card-header-icon" aria-hidden="true">
-              <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" focusable="false">
-                <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path>
-                <polyline points="22 4 12 14.01 9 11.01"></polyline>
-              </svg>
-            </span>
-            <h3>Olofsson Area-Adjusted Accounting</h3>
-          </div>
-          <p>Simple pixel counting systematically biases deforestation estimates due to classification error. GeoFM implements stratified random sampling error matrices based on Olofsson et al. (2014), producing mathematically unbiased disturbance area estimates with explicit 95% confidence intervals.</p>
-        </div>
-
-        <div class="card">
-          <div class="card-header-row">
-            <span class="card-header-icon" aria-hidden="true">
-              <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" focusable="false">
-                <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
-                <polyline points="2 17 12 22 22 17"></polyline>
-                <polyline points="2 12 12 17 22 12"></polyline>
-              </svg>
-            </span>
-            <h3>Audit-Ready Due Diligence Statements</h3>
-          </div>
-          <p>Generate auditable JSON and PDF Due Diligence Statements (DDS) containing plot boundary coordinates, commodity tags, satellite acquisition IDs, cloud contamination scores, and verification timestamps ready for EU Information System upload.</p>
-        </div>
-      </div>
     </section>
 
-    <!-- Section 4: Interactive Sensitivity Sweep Demo (#simulation) -->
+    <!-- Section 4: Sensitivity Sweep Simulator -->
     <section id="simulation" class="section">
-      <h2 class="section-title">Interactive Threshold Trade-Off Simulation</h2>
-      <p class="section-desc">Adjust the decision threshold below to inspect how precision, recall, and IoU trade off under class-imbalanced tropical deforestation monitoring.</p>
+      <h2 class="section-title">Threshold Sensitivity Sweep</h2>
+      <p class="section-desc">Adjust the decision threshold to inspect precision, recall, and IoU trade-offs under class-imbalanced tropical monitoring.</p>
       
       <div class="sim-box">
         <div class="slider-row">
           <label for="simSlider" id="simLabel" class="sim-label">
-            Classification Decision Threshold (&tau;): 
-            <strong id="simThreshVal" style="color:var(--accent-cyan); font-family:var(--font-mono); font-size:1.1rem; margin-left:0.25rem;">0.50</strong>
+            Decision Threshold (&tau;): 
+            <strong id="simThreshVal" style="color:var(--accent-cyan); font-family:var(--font-mono); font-size:1.05rem; margin-left:0.25rem;">0.50</strong>
           </label>
           <input 
             type="range" 
@@ -1049,53 +885,31 @@
       </div>
     </section>
 
-    <!-- Section 5: Quickstart (#quickstart) -->
+    <!-- Section 5: Quickstart -->
     <section id="quickstart" class="section">
-      <h2 class="section-title">Quickstart & Installation</h2>
-      <p class="section-desc">Run GeoFM on your local workstation, cloud GPU server, or headless cluster.</p>
+      <h2 class="section-title">Quickstart</h2>
+      <p class="section-desc">Clone the repository and launch the local training and compliance workstation in 3 commands.</p>
       
       <div class="code-container">
-        <button class="copy-btn" onclick="copyCode(this, 'code-install')" aria-label="Copy installation command">
-          <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <button class="copy-btn" onclick="copyCode(this)" aria-label="Copy terminal commands">
+          <svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
             <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
             <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
           </svg>
           <span>Copy</span>
         </button>
-        <pre class="code-box"><code id="code-install"># 1. Clone the repository
-git clone https://github.com/safiydev/geofm-deforestation.git
-cd geofm-deforestation
-
-# 2. Install package and dependencies
-pip install -e .
-
-# 3. Launch the Autonomous Control Room Web Studio
-python studio.py --port 8501 --host 0.0.0.0
-
-# Open http://localhost:8501 in your browser</code></pre>
-      </div>
-
-      <div class="code-container">
-        <button class="copy-btn" onclick="copyCode(this, 'code-test')" aria-label="Copy test verification command">
-          <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-          </svg>
-          <span>Copy</span>
-        </button>
-        <pre class="code-box"><code id="code-test"># 4. Run full test verification suite (94 passed)
-pytest tests/ -v</code></pre>
+        <pre class="code-box"><code id="code-snippet">git clone https://github.com/safiydev/geofm-deforestation.git
+cd geofm-deforestation && pip install -e .
+pytest tests/ -v                       # 94 tests passed
+python studio.py --port 8501          # launch web studio at http://localhost:8501</code></pre>
       </div>
     </section>
   </main>
 
   <footer>
-    <div style="max-width: 1200px; margin: 0 auto;">
+    <div style="max-width: 1100px; margin: 0 auto;">
       <p>
-        GeoFM Deforestation Foundation Model Suite &middot; Open Source under the <a href="https://github.com/safiydev/geofm-deforestation/blob/main/LICENSE" target="_blank" rel="noopener noreferrer">Apache 2.0 License</a>.
-      </p>
-      <p style="margin-top:0.5rem; font-size:0.80rem;">
-        Documentation hosted on <a href="https://safiydev.github.io/geofm-deforestation/">GitHub Pages</a> &middot; Built with modern Web Standards.
+        GeoFM Foundation Model Suite &middot; Released under the <a href="https://github.com/safiydev/geofm-deforestation/blob/main/LICENSE" target="_blank" rel="noopener noreferrer">Apache 2.0 License</a> &middot; Hosted on <a href="https://safiydev.github.io/geofm-deforestation/">GitHub Pages</a>.
       </p>
     </div>
   </footer>
@@ -1105,7 +919,6 @@ pytest tests/ -v</code></pre>
       const t = parseFloat(val);
       document.getElementById('simThreshVal').innerText = t.toFixed(2);
       
-      // Defensible empirical precision-recall trade-off curve
       const prec = Math.min(0.985, 0.62 + t * 0.38);
       const rec = Math.max(0.58, 0.99 - t * 0.42);
       const f1 = (2 * prec * rec) / (prec + rec);
@@ -1117,8 +930,8 @@ pytest tests/ -v</code></pre>
       document.getElementById('simRec').innerText = (rec * 100).toFixed(1) + '%';
     }
 
-    function copyCode(btn, codeId) {
-      const code = document.getElementById(codeId).innerText;
+    function copyCode(btn) {
+      const code = document.getElementById('code-snippet').innerText;
       navigator.clipboard.writeText(code).then(() => {
         const span = btn.querySelector('span');
         const origText = span.innerText;
