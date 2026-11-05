@@ -17,7 +17,13 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
-from PIL import Image
+
+try:
+    from PIL import Image
+    HAS_PIL = True
+except ImportError:
+    HAS_PIL = False
+    Image = None
 
 try:
     import tifffile
@@ -67,10 +73,15 @@ def _read_band_tiff(zip_ref: zipfile.ZipFile, internal_path: str) -> np.ndarray:
     import io
     if HAS_TIFFFILE:
         return tifffile.imread(io.BytesIO(data))
-    else:
+    elif HAS_PIL and Image is not None:
         # Fallback using PIL
         img = Image.open(io.BytesIO(data))
         return np.array(img)
+    else:
+        raise ImportError(
+            "Neither 'tifffile' nor 'Pillow' is installed. "
+            "Please install one of them: pip install pillow tifffile"
+        )
 
 
 def download_and_cache_real_sentinel2_dataset(
@@ -327,7 +338,12 @@ def download_and_cache_forest_change_dataset(
 
     total_processed = 0
     import io
-    from PIL import Image
+
+    if not HAS_PIL or Image is None:
+        raise ImportError(
+            "Pillow is required for LEVIR-CD image processing. "
+            "Please install Pillow: pip install pillow"
+        )
 
     # Pre-scan and filter for class balance if requested
     pos_triplets = []

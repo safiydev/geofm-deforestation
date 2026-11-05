@@ -598,3 +598,42 @@ def test_web_studio_train_stop_endpoint():
     assert resp.json()["status"] == "stopped"
 
 
+def test_pure_array_to_png_base64_zero_dependency(monkeypatch):
+    import base64
+    import numpy as np
+    from geofm.studio.core import _pure_array_to_png_base64, array_to_png_base64
+    import geofm.studio.core as studio_core
+
+    # 1. Test 2D Grayscale
+    gray = np.full((16, 16), 128, dtype=np.uint8)
+    b64_gray = _pure_array_to_png_base64(gray)
+    assert b64_gray.startswith("data:image/png;base64,")
+    raw_bytes = base64.b64decode(b64_gray.split(",")[1])
+    assert raw_bytes.startswith(b"\x89PNG\r\n\x1a\n")
+
+    # 2. Test 3D RGB
+    rgb = np.zeros((16, 16, 3), dtype=np.uint8)
+    rgb[:, :, 0] = 255
+    b64_rgb = _pure_array_to_png_base64(rgb)
+    assert b64_rgb.startswith("data:image/png;base64,")
+    raw_bytes_rgb = base64.b64decode(b64_rgb.split(",")[1])
+    assert raw_bytes_rgb.startswith(b"\x89PNG\r\n\x1a\n")
+
+    # 3. Test 3D RGBA
+    rgba = np.zeros((16, 16, 4), dtype=np.uint8)
+    rgba[:, :, 3] = 255
+    b64_rgba = _pure_array_to_png_base64(rgba)
+    assert b64_rgba.startswith("data:image/png;base64,")
+    raw_bytes_rgba = base64.b64decode(b64_rgba.split(",")[1])
+    assert raw_bytes_rgba.startswith(b"\x89PNG\r\n\x1a\n")
+
+    # 4. Test fallback mechanism when HAS_PIL is False
+    monkeypatch.setattr(studio_core, "HAS_PIL", False)
+    monkeypatch.setattr(studio_core, "Image", None)
+    fallback_b64 = array_to_png_base64(rgb)
+    assert fallback_b64.startswith("data:image/png;base64,")
+    raw_fallback = base64.b64decode(fallback_b64.split(",")[1])
+    assert raw_fallback.startswith(b"\x89PNG\r\n\x1a\n")
+
+
+

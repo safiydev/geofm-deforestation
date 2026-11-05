@@ -11,6 +11,26 @@ Executes complete pipeline:
   8. HMAC-SHA256 Authenticated Webhook Alerting
 """
 
+import os
+import sys
+
+# Ensure UTF-8 output encoding on Windows terminals to prevent charmap UnicodeEncodeErrors
+if sys.stdout and hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+if sys.stderr and hasattr(sys.stderr, "reconfigure"):
+    try:
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+# Ensure geofm is importable regardless of invocation directory or installation status
+_REPO_ROOT = os.path.abspath(os.path.dirname(__file__))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 from datetime import datetime, timezone
 import json
 import time

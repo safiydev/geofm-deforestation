@@ -1,0 +1,17 @@
+# Core PyTorch Deep Learning Engine
+torch>=2.0.0
+numpy>=1.22.0
+
+# Geospatial Imagery & File Formats
+pillow>=9.0.0
+tifffile>=2023.1.0
+pystac>=1.8.0
+
+# Earth Engine Cloud Integration
+earthengine-api>=0.1.350
+requests>=2.28.0
+
+# Interactive Web Studio & API Backend
+fastapi>=0.100.0
+uvicorn>=0.22.0
+pydantic>=2.0.0

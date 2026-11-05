@@ -7,10 +7,18 @@ import os
 import time
 import threading
 import glob
+import struct
+import zlib
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import numpy as np
 import torch
-from PIL import Image
+
+try:
+    from PIL import Image
+    HAS_PIL = True
+except ImportError:
+    HAS_PIL = False
+    Image = None
 
 from geofm.compliance.dds_auditor import DDSAuditor, DDSAuditReport
 from geofm.compliance.eudr import EUDRValidator, EUDR_CUTOFF_DATE, EUDR_REGULATED_COMMODITIES
@@ -38,21 +46,81 @@ from geofm.utils.synthetic_data import generate_synthetic_dataset, generate_synt
 # Image Visualization & Base64 Data URI Utilities
 # =============================================================================
 
-def array_to_png_base64(arr: np.ndarray) -> str:
-    """Encode an RGB uint8 array (H, W, 3) or grayscale (H, W) to base64 PNG data URI."""
+def _pure_array_to_png_base64(arr: np.ndarray) -> str:
+    """Encode an RGB uint8 array (H, W, 3), RGBA (H, W, 4), or grayscale (H, W) to base64 PNG.
+
+    Zero-dependency pure Python implementation using standard-library struct, zlib, and base64.
+    Used when Pillow is not installed in the environment.
+    """
     if arr.ndim == 2:
-        img = Image.fromarray(arr.astype(np.uint8), mode="L")
+        height, width = arr.shape
+        color_type = 0  # Grayscale (8-bit)
+        raw_data = bytearray()
+        for y in range(height):
+            raw_data.append(0)  # filter type 0 (None)
+            raw_data.extend(arr[y, :].astype(np.uint8).tobytes())
     elif arr.ndim == 3 and arr.shape[2] == 3:
-        img = Image.fromarray(arr.astype(np.uint8), mode="RGB")
+        height, width, _ = arr.shape
+        color_type = 2  # Truecolor RGB (8-bit per channel)
+        raw_data = bytearray()
+        for y in range(height):
+            raw_data.append(0)  # filter type 0 (None)
+            raw_data.extend(arr[y, :, :].astype(np.uint8).tobytes())
     elif arr.ndim == 3 and arr.shape[2] == 4:
-        img = Image.fromarray(arr.astype(np.uint8), mode="RGBA")
+        height, width, _ = arr.shape
+        color_type = 6  # Truecolor with alpha RGBA (8-bit per channel)
+        raw_data = bytearray()
+        for y in range(height):
+            raw_data.append(0)  # filter type 0 (None)
+            raw_data.extend(arr[y, :, :].astype(np.uint8).tobytes())
     else:
         raise ValueError(f"Unsupported array shape for image conversion: {arr.shape}")
 
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+    def _chunk(chunk_type: bytes, data: bytes) -> bytes:
+        length = struct.pack(">I", len(data))
+        crc = struct.pack(">I", zlib.crc32(chunk_type + data) & 0xFFFFFFFF)
+        return length + chunk_type + data + crc
+
+    # PNG File Signature
+    header = b"\x89PNG\r\n\x1a\n"
+    # IHDR Chunk
+    ihdr_data = struct.pack(">IIBBBBB", width, height, 8, color_type, 0, 0, 0)
+    ihdr = _chunk(b"IHDR", ihdr_data)
+    # IDAT Chunk (zlib deflate)
+    compressed = zlib.compress(bytes(raw_data), level=6)
+    idat = _chunk(b"IDAT", compressed)
+    # IEND Chunk
+    iend = _chunk(b"IEND", b"")
+
+    png_bytes = header + ihdr + idat + iend
+    b64 = base64.b64encode(png_bytes).decode("ascii")
     return f"data:image/png;base64,{b64}"
+
+
+def array_to_png_base64(arr: np.ndarray) -> str:
+    """Encode an RGB uint8 array (H, W, 3), RGBA (H, W, 4), or grayscale (H, W) to base64 PNG data URI.
+
+    Seamlessly uses Pillow when available, with automatic zero-dependency standard-library fallback.
+    """
+    if not HAS_PIL or Image is None:
+        return _pure_array_to_png_base64(arr)
+
+    try:
+        if arr.ndim == 2:
+            img = Image.fromarray(arr.astype(np.uint8), mode="L")
+        elif arr.ndim == 3 and arr.shape[2] == 3:
+            img = Image.fromarray(arr.astype(np.uint8), mode="RGB")
+        elif arr.ndim == 3 and arr.shape[2] == 4:
+            img = Image.fromarray(arr.astype(np.uint8), mode="RGBA")
+        else:
+            raise ValueError(f"Unsupported array shape for image conversion: {arr.shape}")
+
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+        return f"data:image/png;base64,{b64}"
+    except Exception:
+        return _pure_array_to_png_base64(arr)
 
 
 def render_optical_rgb(opt_4band: np.ndarray) -> str:
