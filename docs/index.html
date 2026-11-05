@@ -951,17 +951,5 @@ python studio.py --port 8501          # launch web studio at http://localhost:85
       });
     }
   </script>
-<!-- impeccable-live-start -->
-<script>
-  (function() {
-    var host = window.location.hostname || '192.168.200.103';
-    if (host !== 'localhost' && host !== '127.0.0.1' && !host.startsWith('192.168.') && !host.startsWith('10.') && !host.startsWith('172.')) return;
-    var proto = window.location.protocol === 'https:' ? 'https:' : 'http:';
-    var s = document.createElement('script');
-    s.src = proto + '//' + host + ':8400/live.js?token=6cd57682-a6db-40dc-a2b9-1cfe98d44490';
-    document.head.appendChild(s);
-  })();
-</script>
-<!-- impeccable-live-end -->
 </body>
 </html>
