@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 import json
 import os
 from typing import Any, Dict, List, Optional
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from pydantic import BaseModel, Field
@@ -34,13 +34,23 @@ from geofm.studio.core import (
 class TrainRequest(BaseModel):
     architecture: str = Field(default="siamese", description="siamese, unet, or multimodal")
     use_lora: bool = Field(default=True)
-    lora_rank: int = Field(default=8)
-    lora_alpha: float = Field(default=16.0)
+    lora_rank: int = Field(default=16)
+    lora_alpha: float = Field(default=32.0)
     loss_type: str = Field(default="compound")
-    learning_rate: float = Field(default=1e-3)
-    epochs: int = Field(default=3)
-    batch_size: int = Field(default=4)
-    num_samples: int = Field(default=16)
+    tversky_alpha: float = Field(default=0.3)
+    tversky_beta: float = Field(default=0.7)
+    learning_rate: float = Field(default=0.0003)
+    epochs: int = Field(default=20)
+    batch_size: int = Field(default=16)
+    num_samples: int = Field(default=200)
+    dataset_source: str = Field(default="gee")
+    dataset_scale: str = Field(default="continental")
+    gee_project_id: Optional[str] = Field(default="indigo-shuttle-426915-a4")
+    chip_size: int = Field(default=256)
+    use_data_augmentation: bool = Field(default=True)
+    enforce_class_balance: bool = Field(default=True)
+    use_amp: bool = Field(default=True)
+    ram_cache_budget_gb: Optional[float] = Field(default=4.0)
     async_run: bool = Field(default=False)
     resume: bool = Field(default=False)
     cache_dir: str = Field(default="./data/chips_cache")
@@ -55,8 +65,36 @@ class TestBenchmarkRequest(BaseModel):
 class InspectChipRequest(BaseModel):
     chip_idx: int = Field(default=0)
     checkpoint_name: Optional[str] = None
+    checkpoint_path: Optional[str] = None
     threshold: float = Field(default=0.5)
     mmu_ha: float = Field(default=0.10)
+
+
+class ManualInferRequest(BaseModel):
+    chip_idx: Optional[int] = Field(default=None)
+    chip_id: Optional[str] = Field(default=None)
+    checkpoint_path: Optional[str] = Field(default=None)
+    model_type: str = Field(default="siamese")
+    threshold: float = Field(default=0.5)
+    mmu_ha: float = Field(default=0.10)
+    west: float = Field(default=-60.05)
+    north: float = Field(default=-3.05)
+
+
+class SetFolderRequest(BaseModel):
+    folder_path: str
+
+
+class FetchGEERequest(BaseModel):
+    project_id: str = Field(default="indigo-shuttle-426915-a4")
+    num_chips: int = Field(default=200)
+    chip_size: int = Field(default=256)
+    target_pos_ratio: float = Field(default=0.70)
+
+
+class LoadPathCheckpointRequest(BaseModel):
+    file_path: str
+    model_type: str = Field(default="siamese")
 
 
 class ThresholdSweepRequest(BaseModel):
@@ -123,7 +161,7 @@ class CatalogHealRequest(BaseModel):
 # HTML / CSS / JS Single Page App Template
 # =============================================================================
 
-STUDIO_HTML = """<!DOCTYPE html>
+STUDIO_HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -515,6 +553,76 @@ STUDIO_HTML = """<!DOCTYPE html>
     }
     .badge-compliant { background: rgba(16, 185, 129, 0.2); color: var(--accent-emerald); border: 1px solid rgba(16, 185, 129, 0.4); }
     .badge-violation { background: rgba(239, 68, 68, 0.2); color: var(--accent-crimson); border: 1px solid rgba(239, 68, 68, 0.4); }
+
+    /* Dual Viewport & Deforestation Overlay */
+    .viewport-overlay-box {
+      position: relative;
+      width: 100%;
+      aspect-ratio: 1 / 1;
+      background: #05080C;
+      border-radius: 8px;
+      overflow: hidden;
+      border: 1px solid var(--border);
+    }
+    .overlay-base-img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+    .overlay-mask-img {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      pointer-events: none;
+      transition: opacity 0.05s ease;
+    }
+    .overlay-badge {
+      position: absolute;
+      top: 8px;
+      left: 8px;
+      background: rgba(11, 17, 26, 0.85);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 3px 8px;
+      font-size: 0.70rem;
+      font-family: var(--font-mono);
+      color: var(--text);
+      z-index: 10;
+    }
+    .slider-control-card {
+      background: var(--card-elevated);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.85rem 1rem;
+      margin-bottom: 1rem;
+    }
+    .form-range {
+      width: 100%;
+      cursor: pointer;
+      accent-color: var(--accent-crimson);
+    }
+    .config-grid-4 {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 1rem;
+    }
+    .dropzone-box {
+      border: 2px dashed rgba(6, 182, 212, 0.4);
+      background: rgba(6, 182, 212, 0.03);
+      border-radius: 8px;
+      padding: 1.25rem;
+      text-align: center;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+    .dropzone-box:hover {
+      border-color: var(--accent-cyan);
+      background: rgba(6, 182, 212, 0.08);
+    }
   </style>
 </head>
 <body>
@@ -545,13 +653,21 @@ STUDIO_HTML = """<!DOCTYPE html>
       <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><line x1="4" y1="21" x2="4" y2="14"></line><line x1="4" y1="10" x2="4" y2="3"></line><line x1="12" y1="21" x2="12" y2="12"></line><line x1="12" y1="8" x2="12" y2="3"></line><line x1="20" y1="21" x2="20" y2="16"></line><line x1="20" y1="12" x2="20" y2="3"></line><line x1="1" y1="14" x2="7" y2="14"></line><line x1="9" y1="8" x2="15" y2="8"></line><line x1="17" y1="16" x2="23" y2="16"></line></svg>
       Training Studio
     </button>
-    <button class="tab-btn" onclick="switchTab('benchmark')">
-      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
-      Change Benchmark
-    </button>
     <button class="tab-btn" onclick="switchTab('inspector')">
       <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"></circle><line x1="22" y1="12" x2="18" y2="12"></line><line x1="6" y1="12" x2="2" y2="12"></line><line x1="12" y1="6" x2="12" y2="2"></line><line x1="12" y1="22" x2="12" y2="18"></line></svg>
-      Deep Chip Inspector
+      Chip & Mask Viewer
+    </button>
+    <button class="tab-btn" onclick="switchTab('manual-infer')">
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
+      Model Inference Studio
+    </button>
+    <button class="tab-btn" onclick="switchTab('input-loader')">
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
+      Dataset & Input Loader
+    </button>
+    <button class="tab-btn" onclick="switchTab('benchmark')">
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>
+      Benchmark & Scorecard
     </button>
     <button class="tab-btn" onclick="switchTab('map')">
       <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><polygon points="1 6 1 22 8 18 16 22 23 18 23 2 16 6 8 2 1 6"></polygon><line x1="8" y1="2" x2="8" y2="18"></line><line x1="16" y1="6" x2="16" y2="22"></line></svg>
@@ -575,9 +691,54 @@ STUDIO_HTML = """<!DOCTYPE html>
       <div class="grid-2">
         <div>
           <div class="card">
-            <div class="card-title">Training Configuration</div>
+            <div class="card-title">
+              <span>Planetary Training Configuration</span>
+              <span class="badge-pill badge-compliant" style="font-size:0.68rem;">16 Hyperparameters</span>
+            </div>
+
+            <!-- Group 1: Dataset Ingestion & Scale -->
+            <div style="font-size:0.75rem; font-weight:700; color:var(--accent-cyan); text-transform:uppercase; letter-spacing:0.04em; margin-bottom:0.5rem;">
+              1. Dataset Ingestion & Spatial Scale
+            </div>
             <div class="form-group">
-              <label>Model Architecture</label>
+              <label>Dataset Source (DATASET_SOURCE)</label>
+              <select id="trainDatasetSource">
+                <option value="gee" selected>Google Earth Engine + Hansen GFC (1000+ chips)</option>
+                <option value="real">Real Sentinel-2 (OSCD100 Benchmark)</option>
+                <option value="cached">Cached Local Directory</option>
+                <option value="synthetic">Synthetic Multi-Spectral (Zero-RAM Streaming)</option>
+              </select>
+            </div>
+            <div class="grid-2-equal">
+              <div class="form-group">
+                <label>Dataset Scale (DATASET_SCALE)</label>
+                <select id="trainDatasetScale">
+                  <option value="continental" selected>Continental Scale (5,000 chips)</option>
+                  <option value="high_fidelity">High-Fidelity (1,000 chips)</option>
+                  <option value="standard">Standard (200 chips)</option>
+                  <option value="quick">Quick Test (32 chips)</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label>Chip Size (CHIP_SIZE)</label>
+                <select id="trainChipSize">
+                  <option value="256" selected>256 x 256 px (Native 10m Sentinel-2)</option>
+                  <option value="128">128 x 128 px (Standard)</option>
+                  <option value="64">64 x 64 px (Fast Prototype)</option>
+                </select>
+              </div>
+            </div>
+            <div class="form-group">
+              <label>Google Earth Engine Project ID (GEE_PROJECT_ID)</label>
+              <input type="text" id="trainGeeProjectId" class="form-control" value="indigo-shuttle-426915-a4">
+            </div>
+
+            <!-- Group 2: Model Architecture & LoRA PEFT -->
+            <div style="font-size:0.75rem; font-weight:700; color:var(--accent-cyan); text-transform:uppercase; letter-spacing:0.04em; margin:1rem 0 0.5rem 0;">
+              2. Neural Backbone & LoRA Adaptation
+            </div>
+            <div class="form-group">
+              <label>Model Architecture (MODEL_ARCHITECTURE)</label>
               <select id="trainArch">
                 <option value="siamese" selected>Siamese Bitemporal Change Detector (T1 Baseline vs T2 Observation)</option>
                 <option value="multimodal">Multimodal Bitemporal Change Net (Sentinel-1 SAR + Sentinel-2 Optical)</option>
@@ -586,52 +747,87 @@ STUDIO_HTML = """<!DOCTYPE html>
             </div>
             <div class="checkbox-row">
               <input type="checkbox" id="trainUseLora" checked>
-              <label for="trainUseLora">Enable LoRA Parameter-Efficient Fine-Tuning</label>
+              <label for="trainUseLora">Enable LoRA PEFT (USE_LORA)</label>
             </div>
             <div class="grid-2-equal">
               <div class="form-group">
-                <label>LoRA Rank (r)</label>
-                <input type="number" id="trainLoraRank" class="form-control" value="8" min="2" max="64">
+                <label>LoRA Rank (LORA_RANK)</label>
+                <input type="number" id="trainLoraRank" class="form-control" value="16" min="2" max="64">
               </div>
               <div class="form-group">
-                <label>LoRA Alpha (α)</label>
-                <input type="number" id="trainLoraAlpha" class="form-control" value="16.0" min="4" max="128">
+                <label>LoRA Alpha (LORA_ALPHA)</label>
+                <input type="number" id="trainLoraAlpha" class="form-control" value="32.0" min="4" max="128">
               </div>
             </div>
+
+            <!-- Group 3: Loss Function & Hyperparameters -->
+            <div style="font-size:0.75rem; font-weight:700; color:var(--accent-cyan); text-transform:uppercase; letter-spacing:0.04em; margin:1rem 0 0.5rem 0;">
+              3. Objective Loss & Penalties
+            </div>
             <div class="form-group">
-              <label>Loss Function</label>
+              <label>Loss Type (LOSS_TYPE)</label>
               <select id="trainLoss">
                 <option value="compound" selected>Compound Change Detection Loss (Focal + Tversky)</option>
                 <option value="focal_tversky">Focal Tversky Loss</option>
+                <option value="tversky">Tversky Loss</option>
                 <option value="focal">Binary Focal Loss (γ = 2.0)</option>
                 <option value="bce">Standard Binary Cross Entropy</option>
               </select>
             </div>
             <div class="grid-2-equal">
               <div class="form-group">
-                <label>Learning Rate</label>
-                <input type="number" id="trainLR" class="form-control" value="0.001" step="0.0001">
+                <label>Tversky Alpha (TVERSKY_ALPHA)</label>
+                <input type="number" id="trainTverskyAlpha" class="form-control" value="0.3" step="0.05" min="0.05" max="0.95">
               </div>
               <div class="form-group">
-                <label>Epochs</label>
-                <input type="number" id="trainEpochs" class="form-control" value="5" min="1" max="100">
+                <label>Tversky Beta (TVERSKY_BETA)</label>
+                <input type="number" id="trainTverskyBeta" class="form-control" value="0.7" step="0.05" min="0.05" max="0.95">
+              </div>
+            </div>
+
+            <!-- Group 4: Optimization & Acceleration -->
+            <div style="font-size:0.75rem; font-weight:700; color:var(--accent-cyan); text-transform:uppercase; letter-spacing:0.04em; margin:1rem 0 0.5rem 0;">
+              4. Optimization & Acceleration
+            </div>
+            <div class="grid-2-equal">
+              <div class="form-group">
+                <label>Epochs (EPOCHS)</label>
+                <input type="number" id="trainEpochs" class="form-control" value="20" min="1" max="100">
+              </div>
+              <div class="form-group">
+                <label>Batch Size (BATCH_SIZE)</label>
+                <input type="number" id="trainBatch" class="form-control" value="16" min="1" max="64">
               </div>
             </div>
             <div class="grid-2-equal">
               <div class="form-group">
-                <label>Batch Size</label>
-                <input type="number" id="trainBatch" class="form-control" value="4" min="1" max="32">
+                <label>Learning Rate (LEARNING_RATE)</label>
+                <input type="number" id="trainLR" class="form-control" value="0.0003" step="0.00005">
               </div>
               <div class="form-group">
-                <label>Dataset Size</label>
-                <input type="number" id="trainSamples" class="form-control" value="20" min="4" max="500">
+                <label>RAM Budget GB (RAM_CACHE_BUDGET_GB)</label>
+                <input type="number" id="trainRamBudget" class="form-control" value="4.0" step="0.5" min="0.5" max="64.0">
               </div>
+            </div>
+
+            <div class="checkbox-row">
+              <input type="checkbox" id="trainAugmentation" checked>
+              <label for="trainAugmentation">Synchronous D4 Dihedral Data Augmentation (USE_DATA_AUGMENTATION)</label>
+            </div>
+            <div class="checkbox-row">
+              <input type="checkbox" id="trainClassBalance" checked>
+              <label for="trainClassBalance">Enforce 70:30 Deforestation Quota (ENFORCE_CLASS_BALANCE)</label>
+            </div>
+            <div class="checkbox-row">
+              <input type="checkbox" id="trainAmp" checked>
+              <label for="trainAmp">Automatic Mixed Precision FP16 (USE_AMP)</label>
             </div>
             <div class="checkbox-row">
               <input type="checkbox" id="trainResume" checked>
-              <label for="trainResume">Resume from latest checkpoint if present</label>
+              <label for="trainResume">Resume from latest checkpoint</label>
             </div>
-            <div style="display: flex; gap: 0.5rem; margin-top: 1rem;">
+
+            <div style="display: flex; gap: 0.5rem; margin-top: 1.25rem;">
               <button class="btn btn-emerald" style="flex:1;" onclick="startTraining()">
                 <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
                 Start Training
@@ -787,27 +983,346 @@ STUDIO_HTML = """<!DOCTYPE html>
       </div>
     </div>
 
-    <!-- TAB 3: SINGLE-CHIP DEEP INSPECTOR -->
+    <!-- TAB 2: INTERACTIVE SATELLITE CHIP & DEFORESTATION MASK VIEWER -->
     <div id="tab-inspector" class="tab-content">
       <div class="card">
         <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:1rem;">
-          <div style="display:flex; align-items:center; gap:0.75rem;">
-            <div class="card-title" style="margin-bottom:0;">Bitemporal Chip Inspector: <span id="inspChipTitle" style="color:var(--accent-cyan); font-family:var(--font-mono);">chip_0000</span></div>
+          <div style="display:flex; align-items:center; gap:0.6rem; flex-wrap:wrap;">
+            <div class="card-title" style="margin-bottom:0;">Satellite Chip & Deforestation Mask Viewer: <span id="inspChipTitle" style="color:var(--accent-cyan); font-family:var(--font-mono);">chip_0000</span></div>
             <div class="tele-pill">REFERENCE GT: <strong id="inspGtPct" style="color:var(--accent-crimson);">--%</strong></div>
             <div class="tele-pill">DETECTED: <strong id="inspPredPct" style="color:var(--accent-amber);">--%</strong></div>
             <div class="tele-pill">CHANGE IoU: <strong id="inspIoU" style="color:var(--accent-emerald);">--</strong></div>
+            <div class="tele-pill">ALERTS: <strong id="inspAlertsCount" style="color:var(--accent-cyan);">--</strong></div>
+            <div class="tele-pill">AREA: <strong id="inspAreaHa" style="color:var(--accent-amber);">-- ha</strong></div>
           </div>
           <div style="display:flex; align-items:center; gap:0.5rem;">
             <input type="number" id="inspChipIdx" class="form-control" style="width: 80px;" value="0" min="0">
             <button class="btn btn-secondary" onclick="stepChip(-1)">Prev</button>
             <button class="btn btn-secondary" onclick="stepChip(1)">Next</button>
-            <button class="btn btn-cyan" onclick="inspectCurrentChip()">Deep Inspect</button>
+            <button class="btn btn-cyan" onclick="inspectCurrentChip()">Inspect Chip</button>
           </div>
         </div>
       </div>
 
-      <div class="layers-grid" id="layersContainer">
-        <!-- 9 Multi-spectral and detection layers populated dynamically -->
+      <!-- Interactive Deforestation Mask Overlay Viewport with Opacity Slider -->
+      <div class="card">
+        <div class="card-title">
+          <span>Interactive Deforestation Mask Overlay</span>
+          <span style="font-size:0.75rem; color:var(--text-muted); font-weight:400;">Sentinel-2 Optical (T2) with Dynamic Change Mask Blending</span>
+        </div>
+
+        <div class="slider-control-card">
+          <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:0.5rem; margin-bottom:0.5rem;">
+            <div style="font-weight:600; font-size:0.85rem; color:var(--text);">
+              Deforestation Mask Opacity: <strong id="maskOpacityDisplay" style="color:var(--accent-crimson); font-family:var(--font-mono); font-size:0.95rem;">50%</strong>
+            </div>
+            <div style="display:flex; gap:0.4rem; align-items:center;">
+              <span style="font-size:0.72rem; color:var(--text-muted); margin-right:0.25rem;">Quick Presets:</span>
+              <button class="btn btn-secondary" style="padding:2px 8px; font-size:0.72rem;" onclick="setMaskOpacity(0)">0% (Optical)</button>
+              <button class="btn btn-secondary" style="padding:2px 8px; font-size:0.72rem;" onclick="setMaskOpacity(35)">35%</button>
+              <button class="btn btn-secondary" style="padding:2px 8px; font-size:0.72rem;" onclick="setMaskOpacity(50)">50%</button>
+              <button class="btn btn-secondary" style="padding:2px 8px; font-size:0.72rem;" onclick="setMaskOpacity(75)">75%</button>
+              <button class="btn btn-secondary" style="padding:2px 8px; font-size:0.72rem;" onclick="setMaskOpacity(100)">100% (Solid)</button>
+            </div>
+          </div>
+          <input type="range" id="maskOpacitySlider" min="0" max="100" value="50" class="form-range" oninput="onOpacitySliderChange(this.value)">
+        </div>
+
+        <!-- Bitemporal Split Comparison -->
+        <div class="grid-2-equal" style="gap:1.25rem; margin-top:1rem;">
+          <div>
+            <div style="font-size:0.78rem; font-weight:600; color:var(--accent-cyan); margin-bottom:0.4rem; display:flex; justify-content:space-between;">
+              <span>Pre-Disturbance Baseline (T1 Sentinel-2 RGB)</span>
+              <span style="color:var(--text-muted); font-size:0.70rem;">Acquisition T1</span>
+            </div>
+            <div class="viewport-overlay-box">
+              <div class="overlay-badge">T1 OPTICAL BASELINE</div>
+              <img id="inspBaseT1Img" src="" alt="T1 True Color Optical" class="overlay-base-img">
+            </div>
+          </div>
+          <div>
+            <div style="font-size:0.78rem; font-weight:600; color:var(--accent-crimson); margin-bottom:0.4rem; display:flex; justify-content:space-between;">
+              <span>Post-Disturbance Observation (T2 Optical + Live Red Deforestation Mask)</span>
+              <span style="color:var(--text-muted); font-size:0.70rem;">Acquisition T2</span>
+            </div>
+            <div class="viewport-overlay-box" id="viewportOverlayBox">
+              <div class="overlay-badge" style="color:var(--accent-crimson);">T2 + DEFORESTATION OVERLAY</div>
+              <img id="inspBaseT2Img" src="" alt="T2 True Color Optical" class="overlay-base-img">
+              <img id="inspOverlayMaskImg" src="" alt="Deforestation Mask" class="overlay-mask-img" style="opacity: 0.50;">
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Multi-Spectral 11-Layer Gallery -->
+      <div class="card">
+        <div class="card-title">
+          <span>Complete Multi-Spectral & Synthetic Aperture Radar (SAR) Layers</span>
+          <span style="font-size:0.75rem; color:var(--text-muted); font-weight:400;">Optical, Vegetation Indices, Dual-Pol SAR & Ground Truth</span>
+        </div>
+        <div class="layers-grid" id="layersContainer">
+          <!-- Populated dynamically -->
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB 3: MODEL PICKER & MANUAL INFERENCE STUDIO -->
+    <div id="tab-manual-infer" class="tab-content">
+      <div class="grid-2">
+        <div>
+          <!-- Model Selection Card -->
+          <div class="card">
+            <div class="card-title">1. Model Checkpoint Picker</div>
+            <div class="form-group">
+              <label>Model Architecture</label>
+              <select id="manualModelArch" class="form-control">
+                <option value="siamese" selected>Siamese Bitemporal Change Detector</option>
+                <option value="multimodal">Multimodal Bitemporal Change Net (SAR + Optical)</option>
+                <option value="unet">UNet Bitemporal Baseline</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Select Checkpoint from Storage Zoo</label>
+              <select id="manualModelSelect" class="form-control" onchange="onManualModelDropdownChange()">
+                <option value="">Active In-Memory Backbone Weights</option>
+              </select>
+            </div>
+            <div style="text-align:center; font-size:0.72rem; color:var(--text-muted); margin:0.5rem 0;">— OR LOAD FROM DISK —</div>
+            <div class="form-group">
+              <label>Manual Model File Path (.pt / .pth)</label>
+              <div style="display:flex; gap:0.4rem;">
+                <input type="text" id="manualModelPath" class="form-control" placeholder="C:\\Users\\HP\\Downloads\\best_model.pt">
+                <input type="file" id="manualModelFileInput" accept=".pt,.pth" style="display:none;" onchange="handleManualModelFileChosen(this)">
+                <button class="btn btn-secondary" onclick="document.getElementById('manualModelFileInput').click()" title="Browse local disk">Browse</button>
+              </div>
+            </div>
+            <button class="btn btn-cyan btn-block" onclick="loadManualModelFromPath()">
+              <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+              Hot-Load Model Weights
+            </button>
+            <div id="manualModelStatus" style="font-size:0.72rem; margin-top:0.5rem; color:var(--text-muted); font-family:var(--font-mono); word-break:break-all;"></div>
+          </div>
+
+          <!-- Manual Inference Input Card -->
+          <div class="card">
+            <div class="card-title">2. Input Data & Inference Controls</div>
+            <div class="form-group">
+              <label>Satellite Chip Input</label>
+              <select id="manualChipSourceSelect" class="form-control">
+                <option value="sim_deforest">Dynamic Disturbed Scene (12% Deforestation)</option>
+                <option value="sim_intact">Dynamic Intact Canopy (0% Deforestation)</option>
+                <option value="active_chip_0">Active Cache: Chip 0</option>
+                <option value="active_chip_1">Active Cache: Chip 1</option>
+                <option value="active_chip_2">Active Cache: Chip 2</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Detection Threshold: <strong id="manualThreshVal" style="color:var(--accent-cyan);">0.50</strong></label>
+              <input type="range" id="manualThreshold" min="0.10" max="0.90" step="0.05" value="0.50" oninput="document.getElementById('manualThreshVal').innerText = parseFloat(this.value).toFixed(2)">
+            </div>
+            <div class="form-group">
+              <label>Minimum Mapping Unit (MMU): <strong id="manualMmuVal" style="color:var(--accent-emerald);">0.10 ha</strong></label>
+              <input type="range" id="manualMmu" min="0.02" max="1.0" step="0.02" value="0.10" oninput="document.getElementById('manualMmuVal').innerText = parseFloat(this.value).toFixed(2) + ' ha'">
+            </div>
+            <button class="btn btn-emerald btn-block" onclick="runManualInference()">
+              <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+              Run Inference
+            </button>
+          </div>
+        </div>
+
+        <!-- Output Dashboard -->
+        <div>
+          <!-- Scorecard -->
+          <div class="card">
+            <div class="card-title">
+              <span>Inference Scorecard & Performance Metrics</span>
+              <span id="manualInferStatusBadge" class="badge-pill badge-compliant">STANDBY</span>
+            </div>
+            <div class="metrics-row">
+              <div class="metric-cell emerald">
+                <div class="label">Detection IoU</div>
+                <div class="val" id="manualIoU">--</div>
+              </div>
+              <div class="metric-cell cyan">
+                <div class="label">F1 / Dice</div>
+                <div class="val" id="manualF1">--</div>
+              </div>
+              <div class="metric-cell crimson">
+                <div class="label">Detected Area</div>
+                <div class="val" id="manualDetectedArea">-- ha</div>
+              </div>
+              <div class="metric-cell amber">
+                <div class="label">Alert Polygons</div>
+                <div class="val" id="manualAlertsCount">--</div>
+              </div>
+              <div class="metric-cell">
+                <div class="label">Latency</div>
+                <div class="val" id="manualLatency">-- ms</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Interactive Viewports -->
+          <div class="card">
+            <div class="card-title">Interactive Visual Outputs</div>
+            <div class="grid-2-equal" style="gap:1rem;">
+              <div>
+                <div style="font-size:0.75rem; color:var(--text-muted); font-weight:600; margin-bottom:0.3rem;">T1 PRE-DISTURBANCE RGB</div>
+                <div class="viewport-overlay-box">
+                  <img id="manualT1Img" src="" alt="T1 Optical" class="overlay-base-img">
+                </div>
+              </div>
+              <div>
+                <div style="font-size:0.75rem; color:var(--text-muted); font-weight:600; margin-bottom:0.3rem;">T2 OBSERVATION + RED MASK</div>
+                <div class="viewport-overlay-box">
+                  <img id="manualT2Img" src="" alt="T2 Optical" class="overlay-base-img">
+                  <img id="manualMaskImg" src="" alt="Mask" class="overlay-mask-img" style="opacity:0.55;">
+                </div>
+              </div>
+            </div>
+            <div class="grid-2-equal" style="gap:1rem; margin-top:1rem;">
+              <div>
+                <div style="font-size:0.75rem; color:var(--text-muted); font-weight:600; margin-bottom:0.3rem;">PROBABILITY HEATMAP</div>
+                <div class="viewport-overlay-box">
+                  <img id="manualHeatmapImg" src="" alt="Heatmap" class="overlay-base-img">
+                </div>
+              </div>
+              <div>
+                <div style="font-size:0.75rem; color:var(--text-muted); font-weight:600; margin-bottom:0.3rem;">BINARY DETECTION MASK</div>
+                <div class="viewport-overlay-box">
+                  <img id="manualBinaryImg" src="" alt="Binary Mask" class="overlay-base-img">
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Alerts Table & Export -->
+          <div class="card">
+            <div class="card-title">
+              <span>Extracted Deforestation Polygons (GeoJSON)</span>
+              <button class="btn btn-secondary" style="padding:3px 8px; font-size:0.72rem;" onclick="exportManualGeoJSON()">Export GeoJSON</button>
+            </div>
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Polygon ID</th>
+                  <th>Severity</th>
+                  <th>Area (ha)</th>
+                  <th>Mean Prob</th>
+                  <th>Centroid</th>
+                </tr>
+              </thead>
+              <tbody id="manualAlertsTableBody">
+                <tr><td colspan="5" style="color:var(--text-muted); text-align:center;">Run inference to extract polygon alerts.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB 4: DATASET & INPUT LOADER -->
+    <div id="tab-input-loader" class="tab-content">
+      <div class="config-grid-4">
+        <!-- Ingestion Source 1: Google Earth Engine -->
+        <div class="card">
+          <div class="card-title">1. Earth Engine + Hansen GFC</div>
+          <div class="form-group">
+            <label>GEE Project ID (GEE_PROJECT_ID)</label>
+            <input type="text" id="loaderGeeProjectId" class="form-control" value="indigo-shuttle-426915-a4">
+          </div>
+          <div class="form-group">
+            <label>Target Chip Volume</label>
+            <select id="loaderGeeVolume" class="form-control">
+              <option value="200" selected>Standard (200 chips)</option>
+              <option value="1000">High-Fidelity (1,000 chips)</option>
+              <option value="5000">Continental Scale (5,000 chips)</option>
+              <option value="32">Quick Test (32 chips)</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Chip Pixel Size</label>
+            <select id="loaderGeeChipSize" class="form-control">
+              <option value="256" selected>256 x 256 px (10m Sentinel-2)</option>
+              <option value="128">128 x 128 px</option>
+            </select>
+          </div>
+          <button class="btn btn-cyan btn-block" onclick="fetchChipsFromGEE()">
+            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><polygon points="12 2 2 7 12 12 22 7 12 2"></polygon><polyline points="2 17 12 22 22 17"></polyline><polyline points="2 12 12 17 22 12"></polyline></svg>
+            Fetch & Cache from GEE
+          </button>
+          <div id="loaderGeeStatus" style="font-size:0.72rem; margin-top:0.5rem; color:var(--text-muted); font-family:var(--font-mono);"></div>
+        </div>
+
+        <!-- Ingestion Source 2: Custom Local Folder Scanner -->
+        <div class="card">
+          <div class="card-title">2. Local Folder Scanner</div>
+          <div class="form-group">
+            <label>Enter Chips Directory Path</label>
+            <input type="text" id="loaderLocalFolder" class="form-control" placeholder="e.g. C:\\Users\\HP\\satellite_chips or ./data/chips_cache" value="./data/chips_cache">
+          </div>
+          <p style="font-size:0.72rem; color:var(--text-muted); margin-bottom:0.85rem; line-height:1.4;">
+            Point the studio to any folder on your hard drive containing <code>.npz</code> multi-spectral chips or <code>manifest.jsonl</code>.
+          </p>
+          <button class="btn btn-secondary btn-block" onclick="setLocalFolder()">
+            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
+            Set Active Dataset Directory
+          </button>
+          <div id="loaderFolderStatus" style="font-size:0.72rem; margin-top:0.5rem; color:var(--text-muted); font-family:var(--font-mono);"></div>
+        </div>
+
+        <!-- Ingestion Source 3: ZIP Archive Ingestor -->
+        <div class="card">
+          <div class="card-title">3. Upload Satellite ZIP Archive</div>
+          <div class="dropzone-box" onclick="document.getElementById('loaderZipFile').click()">
+            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" style="width:32px; height:32px; stroke-width:1.5; color:var(--accent-cyan); margin-bottom:0.5rem;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
+            <div style="font-size:0.80rem; font-weight:600; color:var(--text);">Select .zip archive of satellite chips</div>
+            <div style="font-size:0.70rem; color:var(--text-muted); margin-top:0.25rem;">Extracts .npz chips directly into active cache</div>
+          </div>
+          <input type="file" id="loaderZipFile" accept=".zip" style="display:none;" onchange="uploadZipFile(this)">
+          <div id="loaderZipStatus" style="font-size:0.72rem; margin-top:0.5rem; color:var(--text-muted); font-family:var(--font-mono);"></div>
+        </div>
+
+        <!-- Ingestion Source 4: Synthetic Multi-Spectral Generator -->
+        <div class="card">
+          <div class="card-title">4. Synthetic Generator</div>
+          <div class="form-group">
+            <label>Number of Chips to Synthesize</label>
+            <input type="number" id="loaderSynthCount" class="form-control" value="20" min="4" max="200">
+          </div>
+          <p style="font-size:0.72rem; color:var(--text-muted); margin-bottom:0.85rem; line-height:1.4;">
+            Instantly stream realistic Sentinel-2 and Sentinel-1 multi-spectral chips with 70:30 class balance.
+          </p>
+          <button class="btn btn-emerald btn-block" onclick="generateSyntheticChipsFromLoader()">
+            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
+            Generate Synthetic Chips
+          </button>
+        </div>
+      </div>
+
+      <!-- Active Dataset Inspector Table -->
+      <div class="card" style="margin-top:1.25rem;">
+        <div class="card-title">
+          <span>Active Cached Chips Dataset</span>
+          <div style="display:flex; gap:0.5rem;">
+            <button class="btn btn-secondary" style="padding:3px 8px; font-size:0.72rem;" onclick="refreshDatasetTable()">Refresh Dataset</button>
+          </div>
+        </div>
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Chip ID</th>
+              <th>File Size</th>
+              <th>Deforestation Area %</th>
+              <th>Class Label Quota</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="loaderChipsTableBody">
+            <tr><td colspan="5" style="color:var(--text-muted); text-align:center;">Scanning cached chips...</td></tr>
+          </tbody>
+        </table>
       </div>
     </div>
 
@@ -1168,20 +1683,29 @@ STUDIO_HTML = """<!DOCTYPE html>
       }
     }
 
-    // Training Actions
+    // Training Actions (All 16 Training Configuration Options)
     async function startTraining() {
       const payload = {
+        dataset_source: document.getElementById('trainDatasetSource') ? document.getElementById('trainDatasetSource').value : 'gee',
+        dataset_scale: document.getElementById('trainDatasetScale') ? document.getElementById('trainDatasetScale').value : 'continental',
+        gee_project_id: document.getElementById('trainGeeProjectId') ? document.getElementById('trainGeeProjectId').value : 'indigo-shuttle-426915-a4',
+        chip_size: parseInt(document.getElementById('trainChipSize') ? document.getElementById('trainChipSize').value : 256),
         architecture: document.getElementById('trainArch').value,
         use_lora: document.getElementById('trainUseLora').checked,
         lora_rank: parseInt(document.getElementById('trainLoraRank').value),
         lora_alpha: parseFloat(document.getElementById('trainLoraAlpha').value),
         loss_type: document.getElementById('trainLoss').value,
-        learning_rate: parseFloat(document.getElementById('trainLR').value),
+        tversky_alpha: parseFloat(document.getElementById('trainTverskyAlpha') ? document.getElementById('trainTverskyAlpha').value : 0.3),
+        tversky_beta: parseFloat(document.getElementById('trainTverskyBeta') ? document.getElementById('trainTverskyBeta').value : 0.7),
         epochs: parseInt(document.getElementById('trainEpochs').value),
         batch_size: parseInt(document.getElementById('trainBatch').value),
-        num_samples: parseInt(document.getElementById('trainSamples').value),
-        async_run: true,
-        resume: document.getElementById('trainResume').checked
+        learning_rate: parseFloat(document.getElementById('trainLR').value),
+        ram_cache_budget_gb: parseFloat(document.getElementById('trainRamBudget') ? document.getElementById('trainRamBudget').value : 4.0),
+        use_data_augmentation: document.getElementById('trainAugmentation') ? document.getElementById('trainAugmentation').checked : true,
+        enforce_class_balance: document.getElementById('trainClassBalance') ? document.getElementById('trainClassBalance').checked : true,
+        use_amp: document.getElementById('trainAmp') ? document.getElementById('trainAmp').checked : true,
+        resume: document.getElementById('trainResume').checked,
+        async_run: true
       };
 
       try {
@@ -1194,7 +1718,7 @@ STUDIO_HTML = """<!DOCTYPE html>
         isTrainingActive = true;
         document.getElementById('trainingStatusDot').className = 'status-pulse busy';
         document.getElementById('teleTrainStatus').innerText = 'TRAINING';
-        appendTerminal(`[INFO] Training initiated with ${payload.architecture} architecture.`);
+        appendTerminal(`[INFO] Planetary training initiated with ${payload.architecture} architecture on ${payload.dataset_source} dataset (${payload.dataset_scale} scale).`);
         if (trainingPollInterval) clearInterval(trainingPollInterval);
         trainingPollInterval = setInterval(pollTrainingStatus, 1000);
       } catch (err) {
@@ -1339,7 +1863,25 @@ STUDIO_HTML = """<!DOCTYPE html>
       }
     }
 
-    // Chip Deep Inspector
+    // Dynamic Mask Opacity Controls
+    function setMaskOpacity(val) {
+      const slider = document.getElementById('maskOpacitySlider');
+      if (slider) {
+        slider.value = val;
+        onOpacitySliderChange(val);
+      }
+    }
+
+    function onOpacitySliderChange(val) {
+      const display = document.getElementById('maskOpacityDisplay');
+      if (display) display.innerText = val + '%';
+      const maskImg = document.getElementById('inspOverlayMaskImg');
+      if (maskImg) {
+        maskImg.style.opacity = (parseFloat(val) / 100).toFixed(2);
+      }
+    }
+
+    // Chip Deep Inspector & Multi-Spectral Layer Gallery
     async function inspectCurrentChip() {
       const idx = parseInt(document.getElementById('inspChipIdx').value) || 0;
       try {
@@ -1353,29 +1895,51 @@ STUDIO_HTML = """<!DOCTYPE html>
         document.getElementById('inspGtPct').innerText = d.ground_truth_pct + '%';
         document.getElementById('inspPredPct').innerText = (d.detected_pct !== undefined ? d.detected_pct : d.predicted_pct) + '%';
         document.getElementById('inspIoU').innerText = (d.chip_iou * 100).toFixed(1) + '%';
+        if (document.getElementById('inspAlertsCount')) {
+          document.getElementById('inspAlertsCount').innerText = d.total_alerts !== undefined ? d.total_alerts : '--';
+        }
+        if (document.getElementById('inspAreaHa')) {
+          document.getElementById('inspAreaHa').innerText = (d.total_deforested_ha !== undefined ? d.total_deforested_ha.toFixed(2) : '--') + ' ha';
+        }
+
+        // Set dual viewport overlay images
+        const t1El = document.getElementById('inspBaseT1Img');
+        const t2El = document.getElementById('inspBaseT2Img');
+        const maskEl = document.getElementById('inspOverlayMaskImg');
+        if (t1El && d.layers.t1_rgb) t1El.src = d.layers.t1_rgb;
+        if (t2El && d.layers.t2_rgb) t2El.src = d.layers.t2_rgb;
+        if (maskEl) {
+          maskEl.src = d.layers.pred_binary_mask || d.layers.detected_binary_mask || d.layers.mask_overlay;
+          const currentOpacity = document.getElementById('maskOpacitySlider') ? (document.getElementById('maskOpacitySlider').value / 100) : 0.50;
+          maskEl.style.opacity = currentOpacity;
+        }
 
         const layers = [
           { title: 'T1 S-2 Baseline Optical (RGB)', src: d.layers.t1_rgb },
           { title: 'T2 S-2 Post-Acquisition Optical (RGB)', src: d.layers.t2_rgb },
+          { title: 'Translucent Red Deforestation Overlay', src: d.layers.mask_overlay },
+          { title: 'Ground Truth Reference Mask (Hansen GFC)', src: d.layers.ground_truth_mask },
+          { title: 'AI Deforestation Detection Probability', src: d.layers.probability_heatmap },
+          { title: 'Detected Binary Change Mask', src: d.layers.pred_binary_mask || d.layers.detected_binary_mask },
+          { title: 'Bitemporal Change Confusion Diff Map', src: d.layers.error_diff_map },
           { title: 'T1 Baseline Color Infrared (CIR)', src: d.layers.t1_cir },
           { title: 'T2 Observation Color Infrared (CIR)', src: d.layers.t2_cir },
           { title: 'T1 Baseline NDVI Canopy Index', src: d.layers.ndvi_t1 },
           { title: 'T2 Observation NDVI Canopy Index', src: d.layers.ndvi_t2 },
-          { title: 'Sentinel-1 SAR Radar Composite', src: d.layers.sar_composite },
-          { title: 'Ground Truth Reference Mask (Hansen GFC)', src: d.layers.ground_truth_mask },
-          { title: 'AI Deforestation Detection Probability', src: d.layers.probability_heatmap },
-          { title: 'Bitemporal Change Confusion Diff Map', src: d.layers.error_diff_map }
+          { title: 'Sentinel-1 SAR Radar Composite', src: d.layers.sar_composite }
         ];
 
         const container = document.getElementById('layersContainer');
-        container.innerHTML = layers.map(l => `
-          <div class="layer-card">
-            <div class="layer-header">
-              <span>${l.title}</span>
+        if (container) {
+          container.innerHTML = layers.map(l => `
+            <div class="layer-card">
+              <div class="layer-header">
+                <span>${l.title}</span>
+              </div>
+              <img src="${l.src}" alt="${l.title}">
             </div>
-            <img src="${l.src}" alt="${l.title}">
-          </div>
-        `).join('');
+          `).join('');
+        }
       } catch (err) {
         console.error('Inspect error:', err);
       }
@@ -1603,28 +2167,33 @@ STUDIO_HTML = """<!DOCTYPE html>
         const chks = await resp.json();
         const tbody = document.getElementById('checkpointsTableBody');
         const benchSel = document.getElementById('benchCheckpoint');
+        const manualSel = document.getElementById('manualModelSelect');
 
-        benchSel.innerHTML = '<option value="">Active Siamese Backbone (In-Memory)</option>';
+        if (benchSel) benchSel.innerHTML = '<option value="">Active Siamese Backbone (In-Memory)</option>';
+        if (manualSel) manualSel.innerHTML = '<option value="">Active In-Memory Backbone Weights</option>';
         if (chks.length === 0) {
-          tbody.innerHTML = '<tr><td colspan="5" style="color:var(--text-muted); text-align:center;">No .pt checkpoints found.</td></tr>';
+          if (tbody) tbody.innerHTML = '<tr><td colspan="5" style="color:var(--text-muted); text-align:center;">No .pt checkpoints found.</td></tr>';
           return;
         }
 
-        tbody.innerHTML = chks.map(c => `
-          <tr>
-            <td><strong>${escapeHtml(c.filename)}</strong></td>
-            <td>${c.size_mb} MB</td>
-            <td>${c.epoch}</td>
-            <td style="color:var(--accent-emerald);">${typeof c.best_val_iou === 'number' ? (c.best_val_iou * 100).toFixed(1) + '%' : c.best_val_iou}</td>
-            <td>
-              <a href="/studio/api/download/${encodeURIComponent(c.filename)}" class="btn btn-secondary" style="padding:2px 7px; font-size:0.70rem;">Download</a>
-              <button class="btn btn-cyan" style="padding:2px 7px; font-size:0.70rem;" onclick="loadCheckpointForInference('${escapeHtml(c.filename)}')">Load</button>
-            </td>
-          </tr>
-        `).join('');
+        if (tbody) {
+          tbody.innerHTML = chks.map(c => `
+            <tr>
+              <td><strong>${escapeHtml(c.filename)}</strong></td>
+              <td>${c.size_mb} MB</td>
+              <td>${c.epoch}</td>
+              <td style="color:var(--accent-emerald);">${typeof c.best_val_iou === 'number' ? (c.best_val_iou * 100).toFixed(1) + '%' : c.best_val_iou}</td>
+              <td>
+                <a href="/studio/api/download/${encodeURIComponent(c.filename)}" class="btn btn-secondary" style="padding:2px 7px; font-size:0.70rem;">Download</a>
+                <button class="btn btn-cyan" style="padding:2px 7px; font-size:0.70rem;" onclick="loadCheckpointForInference('${escapeHtml(c.filename)}')">Load</button>
+              </td>
+            </tr>
+          `).join('');
+        }
 
         chks.forEach(c => {
-          benchSel.innerHTML += `<option value="${escapeHtml(c.filename)}">${escapeHtml(c.filename)} (${c.size_mb} MB)</option>`;
+          if (benchSel) benchSel.innerHTML += `<option value="${escapeHtml(c.filename)}">${escapeHtml(c.filename)} (${c.size_mb} MB)</option>`;
+          if (manualSel) manualSel.innerHTML += `<option value="${escapeHtml(c.filename)}">${escapeHtml(c.filename)} (${c.size_mb} MB)</option>`;
         });
       } catch (err) {
         console.warn('Failed loading checkpoints:', err);
@@ -1650,6 +2219,7 @@ STUDIO_HTML = """<!DOCTYPE html>
         const resp = await fetch('/studio/api/chips');
         const data = await resp.json();
         const tbody = document.getElementById('chipsTableBody');
+        if (!tbody) return;
         if (!data.chips || data.chips.length === 0) {
           tbody.innerHTML = '<tr><td colspan="4" style="color:var(--text-muted); text-align:center;">No chips cached. Click "Generate 70:30 Chips" above.</td></tr>';
           return;
@@ -1677,10 +2247,329 @@ STUDIO_HTML = """<!DOCTYPE html>
         const data = await resp.json();
         alert(`Successfully generated ${data.created_chips} chips! (${data.deforest_chips} DEFOREST, ${data.intact_chips} INTACT enforcing 70:30 quota)`);
         loadChipsZoo();
+        refreshDatasetTable();
         updateTelemetry();
       } catch (err) {
         alert('Chip generation error: ' + err);
       }
+    }
+
+    // =========================================================================
+    // Tab 3: Model Picker & Manual Inference Studio JavaScript
+    // =========================================================================
+    let manualActiveGeoJSON = null;
+
+    function onManualModelDropdownChange() {
+      const sel = document.getElementById('manualModelSelect');
+      const pathInput = document.getElementById('manualModelPath');
+      if (sel && sel.value) {
+        if (pathInput) pathInput.value = sel.value;
+      }
+    }
+
+    function handleManualModelFileChosen(input) {
+      if (input.files && input.files[0]) {
+        const file = input.files[0];
+        const pathInput = document.getElementById('manualModelPath');
+        if (pathInput) pathInput.value = file.name;
+        const statusBox = document.getElementById('manualModelStatus');
+        if (statusBox) statusBox.innerHTML = `<span style="color:var(--accent-cyan);">Selected local file: ${escapeHtml(file.name)}</span>`;
+      }
+    }
+
+    async function loadManualModelFromPath() {
+      const pathVal = document.getElementById('manualModelPath') ? document.getElementById('manualModelPath').value.trim() : '';
+      const archVal = document.getElementById('manualModelArch') ? document.getElementById('manualModelArch').value : 'siamese';
+      const statusBox = document.getElementById('manualModelStatus');
+      if (!pathVal) {
+        if (statusBox) statusBox.innerHTML = '<span style="color:var(--accent-amber);">Please enter a model file path or select a checkpoint.</span>';
+        return;
+      }
+      if (statusBox) statusBox.innerHTML = '<span>Loading model weights from path...</span>';
+      try {
+        const resp = await fetch('/studio/api/checkpoints/load-path', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ file_path: pathVal, model_type: archVal })
+        });
+        const res = await resp.json();
+        if (statusBox) {
+          if (res.load_result && res.load_result.status === 'success') {
+            statusBox.innerHTML = `<span style="color:var(--accent-emerald);">✓ ${escapeHtml(res.load_result.message)}</span>`;
+          } else {
+            statusBox.innerHTML = `<span style="color:var(--accent-crimson);">${escapeHtml(res.load_result ? res.load_result.message : 'Error')}</span>`;
+          }
+        }
+      } catch (e) {
+        if (statusBox) statusBox.innerHTML = `<span style="color:var(--accent-crimson);">Failed loading model: ${escapeHtml(String(e))}</span>`;
+      }
+    }
+
+    async function runManualInference() {
+      const chipSource = document.getElementById('manualChipSourceSelect') ? document.getElementById('manualChipSourceSelect').value : 'sim_deforest';
+      const threshold = parseFloat(document.getElementById('manualThreshold') ? document.getElementById('manualThreshold').value : 0.5);
+      const mmu = parseFloat(document.getElementById('manualMmu') ? document.getElementById('manualMmu').value : 0.10);
+      const modelPath = document.getElementById('manualModelPath') ? document.getElementById('manualModelPath').value.trim() : null;
+      const modelArch = document.getElementById('manualModelArch') ? document.getElementById('manualModelArch').value : 'siamese';
+
+      let chipIdx = null;
+      let chipId = null;
+      if (chipSource.startsWith('active_chip_')) {
+        chipIdx = parseInt(chipSource.replace('active_chip_', '')) || 0;
+      } else if (chipSource.startsWith('chip_')) {
+        chipId = chipSource;
+      } else {
+        chipId = chipSource;
+      }
+
+      const payload = {
+        chip_idx: chipIdx,
+        chip_id: chipId,
+        checkpoint_path: modelPath || null,
+        model_type: modelArch,
+        threshold: threshold,
+        mmu_ha: mmu,
+        west: -60.05,
+        north: -3.05
+      };
+
+      try {
+        const resp = await fetch('/studio/api/infer/manual', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const d = await resp.json();
+        manualActiveGeoJSON = d.geojson;
+
+        const badge = document.getElementById('manualInferStatusBadge');
+        if (badge) {
+          badge.className = 'badge-pill badge-compliant';
+          badge.innerText = 'INFERENCE COMPLETE';
+        }
+
+        if (d.metrics && d.metrics.has_ground_truth) {
+          document.getElementById('manualIoU').innerText = (d.metrics.iou * 100).toFixed(1) + '%';
+          document.getElementById('manualF1').innerText = (d.metrics.f1 * 100).toFixed(1) + '%';
+        } else {
+          document.getElementById('manualIoU').innerText = 'N/A (Unlabelled)';
+          document.getElementById('manualF1').innerText = 'N/A (Unlabelled)';
+        }
+
+        document.getElementById('manualDetectedArea').innerText = (d.total_deforested_ha !== undefined ? d.total_deforested_ha.toFixed(2) : '0.00') + ' ha';
+        document.getElementById('manualAlertsCount').innerText = d.total_alerts !== undefined ? d.total_alerts : 0;
+        document.getElementById('manualLatency').innerText = (d.elapsed_ms !== undefined ? d.elapsed_ms : 0) + ' ms';
+
+        // Render images
+        const t1 = document.getElementById('manualT1Img');
+        const t2 = document.getElementById('manualT2Img');
+        const mask = document.getElementById('manualMaskImg');
+        const heat = document.getElementById('manualHeatmapImg');
+        const bin = document.getElementById('manualBinaryImg');
+
+        if (t1 && d.layers.t1_rgb) t1.src = d.layers.t1_rgb;
+        if (t2 && d.layers.t2_rgb) t2.src = d.layers.t2_rgb;
+        if (mask && (d.layers.mask_overlay_red_trans || d.layers.pred_binary_mask)) {
+          mask.src = d.layers.mask_overlay_red_trans || d.layers.pred_binary_mask;
+        }
+        if (heat && d.layers.probability_heatmap) heat.src = d.layers.probability_heatmap;
+        if (bin && (d.layers.pred_binary_mask || d.layers.detected_binary_mask)) {
+          bin.src = d.layers.pred_binary_mask || d.layers.detected_binary_mask;
+        }
+
+        // Render Polygons Table
+        const tbody = document.getElementById('manualAlertsTableBody');
+        if (tbody) {
+          if (!d.geojson || !d.geojson.features || d.geojson.features.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="5" style="color:var(--text-muted); text-align:center;">No deforestation polygons detected above MMU threshold.</td></tr>';
+          } else {
+            tbody.innerHTML = d.geojson.features.map((f, i) => {
+              const p = f.properties || {};
+              const lvl = p.alert_level || 'MEDIUM';
+              const col = lvl === 'CRITICAL' ? 'var(--accent-crimson)' : (lvl === 'HIGH' ? 'var(--accent-amber)' : 'var(--accent-cyan)');
+              const coords = f.geometry && f.geometry.coordinates && f.geometry.coordinates[0] && f.geometry.coordinates[0][0]
+                ? `${f.geometry.coordinates[0][0][1].toFixed(4)}, ${f.geometry.coordinates[0][0][0].toFixed(4)}`
+                : '--';
+              return `
+                <tr>
+                  <td><code>${escapeHtml(p.alert_id || 'POLY-' + (i+1))}</code></td>
+                  <td><span class="badge-pill" style="color:${col}; border-color:${col};">${lvl}</span></td>
+                  <td><strong>${(p.area_ha || 0).toFixed(2)} ha</strong></td>
+                  <td>${((p.confidence || 0) * 100).toFixed(0)}%</td>
+                  <td><code>${coords}</code></td>
+                </tr>
+              `;
+            }).join('');
+          }
+        }
+      } catch (err) {
+        alert('Manual inference failed: ' + err);
+      }
+    }
+
+    function exportManualGeoJSON() {
+      if (!manualActiveGeoJSON) {
+        alert('Run inference first to generate alert polygons.');
+        return;
+      }
+      const dataStr = 'data:text/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(manualActiveGeoJSON, null, 2));
+      const a = document.createElement('a');
+      a.setAttribute('href', dataStr);
+      a.setAttribute('download', 'geofm_manual_inference_alerts.geojson');
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    }
+
+    // =========================================================================
+    // Tab 4: Dataset & Input Loader JavaScript
+    // =========================================================================
+    async function fetchChipsFromGEE() {
+      const projId = document.getElementById('loaderGeeProjectId') ? document.getElementById('loaderGeeProjectId').value.trim() : 'indigo-shuttle-426915-a4';
+      const vol = parseInt(document.getElementById('loaderGeeVolume') ? document.getElementById('loaderGeeVolume').value : 200);
+      const chipSz = parseInt(document.getElementById('loaderGeeChipSize') ? document.getElementById('loaderGeeChipSize').value : 256);
+      const statusBox = document.getElementById('loaderGeeStatus');
+
+      if (statusBox) statusBox.innerHTML = '<span style="color:var(--accent-cyan);">Fetching chips from Earth Engine...</span>';
+      try {
+        const resp = await fetch('/studio/api/dataset/fetch-gee', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ project_id: projId, num_chips: vol, chip_size: chipSz, target_pos_ratio: 0.70 })
+        });
+        const res = await resp.json();
+        if (statusBox) {
+          statusBox.innerHTML = `<span style="color:var(--accent-emerald);">✓ ${escapeHtml(res.message || 'Fetched chips')} (${res.cached_chips_count} in cache)</span>`;
+        }
+        refreshDatasetTable();
+        updateTelemetry();
+      } catch (e) {
+        if (statusBox) statusBox.innerHTML = `<span style="color:var(--accent-crimson);">Failed: ${escapeHtml(String(e))}</span>`;
+      }
+    }
+
+    async function setLocalFolder() {
+      const folderPath = document.getElementById('loaderLocalFolder') ? document.getElementById('loaderLocalFolder').value.trim() : '';
+      const statusBox = document.getElementById('loaderFolderStatus');
+      if (!folderPath) {
+        if (statusBox) statusBox.innerHTML = '<span style="color:var(--accent-amber);">Enter a directory path</span>';
+        return;
+      }
+      if (statusBox) statusBox.innerHTML = '<span>Scanning folder...</span>';
+      try {
+        const resp = await fetch('/studio/api/dataset/set-folder', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ folder_path: folderPath })
+        });
+        const res = await resp.json();
+        if (statusBox) {
+          if (res.status === 'success') {
+            statusBox.innerHTML = `<span style="color:var(--accent-emerald);">✓ ${escapeHtml(res.message)} (${res.chips_count} chips found)</span>`;
+          } else {
+            statusBox.innerHTML = `<span style="color:var(--accent-crimson);">${escapeHtml(res.message)}</span>`;
+          }
+        }
+        refreshDatasetTable();
+        updateTelemetry();
+      } catch (e) {
+        if (statusBox) statusBox.innerHTML = `<span style="color:var(--accent-crimson);">Failed: ${escapeHtml(String(e))}</span>`;
+      }
+    }
+
+    async function uploadZipFile(input) {
+      if (!input.files || !input.files[0]) return;
+      const file = input.files[0];
+      const statusBox = document.getElementById('loaderZipStatus');
+      if (statusBox) statusBox.innerHTML = '<span style="color:var(--accent-cyan);">Uploading & extracting ZIP archive...</span>';
+
+      const formData = new FormData();
+      formData.append('file', file);
+
+      try {
+        const resp = await fetch('/studio/api/dataset/upload-zip', {
+          method: 'POST',
+          body: formData
+        });
+        const res = await resp.json();
+        if (statusBox) {
+          if (res.status === 'success') {
+            statusBox.innerHTML = `<span style="color:var(--accent-emerald);">✓ Extracted ${res.extracted_count} chips into active cache!</span>`;
+          } else {
+            statusBox.innerHTML = `<span style="color:var(--accent-crimson);">${escapeHtml(res.message)}</span>`;
+          }
+        }
+        refreshDatasetTable();
+        updateTelemetry();
+      } catch (e) {
+        if (statusBox) statusBox.innerHTML = `<span style="color:var(--accent-crimson);">Upload failed: ${escapeHtml(String(e))}</span>`;
+      }
+    }
+
+    async function generateSyntheticChipsFromLoader() {
+      const count = parseInt(document.getElementById('loaderSynthCount') ? document.getElementById('loaderSynthCount').value : 20);
+      try {
+        const resp = await fetch('/studio/api/chips/generate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ num_chips: count, deforest_ratio: 0.70 })
+        });
+        const data = await resp.json();
+        alert(`Successfully generated ${data.created_chips} synthetic chips with 70:30 class balance!`);
+        refreshDatasetTable();
+        updateTelemetry();
+      } catch (e) {
+        alert('Synthetic generation failed: ' + e);
+      }
+    }
+
+    async function refreshDatasetTable() {
+      try {
+        const resp = await fetch('/studio/api/chips?limit=50');
+        const data = await resp.json();
+        const tbody = document.getElementById('loaderChipsTableBody');
+        const manualChipSel = document.getElementById('manualChipSourceSelect');
+
+        if (manualChipSel) {
+          let optionsHtml = `
+            <option value="sim_deforest">Dynamic Disturbed Scene (12% Deforestation)</option>
+            <option value="sim_intact">Dynamic Intact Canopy (0% Deforestation)</option>
+          `;
+          if (data.chips && data.chips.length > 0) {
+            data.chips.slice(0, 30).forEach((c, idx) => {
+              optionsHtml += `<option value="active_chip_${idx}">Active Cache: ${escapeHtml(c.chip_id)} (${c.deforestation_pct}%)</option>`;
+            });
+          }
+          manualChipSel.innerHTML = optionsHtml;
+        }
+
+        if (!tbody) return;
+        if (!data.chips || data.chips.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="5" style="color:var(--text-muted); text-align:center;">No chips cached in active dataset directory. Use any loader card above.</td></tr>';
+          return;
+        }
+
+        tbody.innerHTML = data.chips.map((c, idx) => `
+          <tr>
+            <td><code>${escapeHtml(c.chip_id)}</code></td>
+            <td>${c.size_kb} KB</td>
+            <td style="color:${c.deforestation_pct > 0 ? 'var(--accent-crimson)' : 'var(--accent-emerald)'}; font-weight:600;">${c.deforestation_pct}%</td>
+            <td><span class="badge-pill ${c.class_label === 'DEFOREST' ? 'badge-violation' : 'badge-compliant'}">${c.class_label}</span></td>
+            <td>
+              <button class="btn btn-cyan" style="padding:2px 7px; font-size:0.70rem;" onclick="jumpToChipInViewer(${idx})">View in Viewer</button>
+            </td>
+          </tr>
+        `).join('');
+      } catch (err) {
+        console.warn('Dataset table refresh failed:', err);
+      }
+    }
+
+    function jumpToChipInViewer(idx) {
+      switchTab('inspector');
+      const el = document.getElementById('inspChipIdx');
+      if (el) el.value = idx;
+      inspectCurrentChip();
     }
 
     function escapeHtml(str) {
@@ -1696,6 +2585,7 @@ STUDIO_HTML = """<!DOCTYPE html>
       loadPresets();
       loadCheckpoints();
       loadChipsZoo();
+      refreshDatasetTable();
       inspectCurrentChip();
       runGeospatialInference();
       setInterval(updateTelemetry, 5000);
@@ -1748,10 +2638,20 @@ def create_studio_app() -> FastAPI:
             lora_rank=req.lora_rank,
             lora_alpha=req.lora_alpha,
             loss_type=req.loss_type,
+            tversky_alpha=req.tversky_alpha,
+            tversky_beta=req.tversky_beta,
             learning_rate=req.learning_rate,
             epochs=req.epochs,
             batch_size=req.batch_size,
             num_samples=req.num_samples,
+            dataset_source=req.dataset_source,
+            dataset_scale=req.dataset_scale,
+            gee_project_id=req.gee_project_id,
+            chip_size=req.chip_size,
+            use_data_augmentation=req.use_data_augmentation,
+            enforce_class_balance=req.enforce_class_balance,
+            use_amp=req.use_amp,
+            ram_cache_budget_gb=req.ram_cache_budget_gb,
             async_run=req.async_run,
             resume=req.resume,
             cache_dir=req.cache_dir,
@@ -1794,6 +2694,20 @@ def create_studio_app() -> FastAPI:
         )
         return result
 
+    @app.post("/studio/api/infer/manual")
+    def infer_manual_endpoint(req: ManualInferRequest):
+        return inference_mgr.run_manual_inference(
+            chip_idx=req.chip_idx,
+            chip_id=req.chip_id,
+            checkpoint_path=req.checkpoint_path,
+            model_type=req.model_type,
+            threshold=req.threshold,
+            mmu_ha=req.mmu_ha,
+            west=req.west,
+            north=req.north,
+            cache_dir=chip_mgr.cache_dir,
+        )
+
     @app.post("/studio/api/test/benchmark")
     def test_benchmark_endpoint(req: TestBenchmarkRequest):
         return inference_mgr.test_benchmark(
@@ -1807,6 +2721,7 @@ def create_studio_app() -> FastAPI:
         return inference_mgr.inspect_chip(
             chip_idx=req.chip_idx,
             checkpoint_name=req.checkpoint_name,
+            checkpoint_path=req.checkpoint_path,
             threshold=req.threshold,
             mmu_ha=req.mmu_ha,
         )
@@ -1904,6 +2819,34 @@ def create_studio_app() -> FastAPI:
             return {"status": "success", "message": f"Successfully hot-loaded weights from {safe_name}"}
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed loading checkpoint: {str(e)}")
+
+    @app.post("/studio/api/checkpoints/load-path")
+    def load_path_checkpoint_endpoint(req: LoadPathCheckpointRequest):
+        load_res = inference_mgr.load_model_weights(req.file_path, model_type=req.model_type)
+        chk_info = checkpoint_mgr.load_checkpoint_from_path(req.file_path)
+        return {
+            "load_result": load_res,
+            "checkpoint_info": chk_info,
+        }
+
+    # --- Dataset & Input Loader API Endpoints ---
+    @app.post("/studio/api/dataset/set-folder")
+    def dataset_set_folder_endpoint(req: SetFolderRequest):
+        return chip_mgr.set_cache_dir(req.folder_path)
+
+    @app.post("/studio/api/dataset/upload-zip")
+    async def dataset_upload_zip_endpoint(file: UploadFile = File(...)):
+        content = await file.read()
+        return chip_mgr.extract_chips_zip(content)
+
+    @app.post("/studio/api/dataset/fetch-gee")
+    def dataset_fetch_gee_endpoint(req: FetchGEERequest):
+        return chip_mgr.fetch_gee_chips(
+            project_id=req.project_id,
+            num_chips=req.num_chips,
+            chip_size=req.chip_size,
+            target_pos_ratio=req.target_pos_ratio,
+        )
 
     @app.get("/studio/api/chips")
     def list_chips_endpoint(limit: int = 100):

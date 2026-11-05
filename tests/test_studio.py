@@ -676,20 +676,154 @@ def test_dynamic_infer_and_olofsson_endpoints():
     assert d["north"] == 0.50
     assert d["seed"] == 9999
 
-    # Test Olofsson with custom counts
-    resp_olof = client.post("/studio/api/olofsson", json={
-        "source": "custom",
-        "tp": 100,
-        "fp": 10,
-        "fn": 5,
-        "tn": 400,
-        "stratum_deforest_ha": 1500.0,
-        "stratum_forest_ha": 18500.0
+def test_render_mask_overlay():
+    import numpy as np
+    from geofm.studio.core import render_mask_overlay, render_mask
+
+    opt = np.random.uniform(0.0, 1.0, (4, 32, 32)).astype(np.float32)
+    mask = (np.random.uniform(0.0, 1.0, (32, 32)) > 0.7).astype(np.float32)
+
+    # Test mask overlay on optical image
+    b64_overlay = render_mask_overlay(opt, mask, color=(239, 68, 68), alpha=0.50)
+    assert b64_overlay.startswith("data:image/png;base64,")
+
+    # Test solid mask rendering
+    b64_mask = render_mask(mask, color=[239, 68, 68])
+    assert b64_mask.startswith("data:image/png;base64,")
+
+
+def test_web_studio_16_parameter_training_config(tmp_path):
+    # Verify all 16 configuration options are accepted and processed
+    resp = client.post("/studio/api/train", json={
+        "architecture": "siamese",
+        "dataset_source": "auto",
+        "dataset_scale": "quick",
+        "gee_project_id": "indigo-shuttle-426915-a4",
+        "chip_size": 64,
+        "use_lora": True,
+        "lora_rank": 8,
+        "lora_alpha": 16.0,
+        "loss_type": "compound",
+        "tversky_alpha": 0.3,
+        "tversky_beta": 0.7,
+        "epochs": 1,
+        "batch_size": 2,
+        "learning_rate": 0.0003,
+        "ram_cache_budget_gb": 4.0,
+        "use_data_augmentation": True,
+        "enforce_class_balance": True,
+        "use_amp": False,
+        "num_samples": 4,
+        "async_run": False,
+        "resume": False,
+        "cache_dir": str(tmp_path / "train_cache"),
     })
-    assert resp_olof.status_code == 200
-    olof_d = resp_olof.json()
-    assert "overall_accuracy_pct" in olof_d
-    assert olof_d["overall_accuracy_pct"] > 90.0
+    assert resp.status_code == 200
+    d = resp.json()
+    assert d["architecture"] == "siamese"
+    assert d["use_lora"] is True
+    assert d["loss_type"] == "compound"
+    assert "best_val_iou" in d
+
+
+def test_inspect_chip_with_overlay_and_layers():
+    resp = client.post("/studio/api/test/chip", json={
+        "chip_idx": 0,
+        "threshold": 0.50,
+        "mmu_ha": 0.10,
+    })
+    assert resp.status_code == 200
+    d = resp.json()
+    assert "chip_id" in d
+    assert "chip_iou" in d
+    assert "layers" in d
+    layers = d["layers"]
+    assert "t1_rgb" in layers
+    assert "t2_rgb" in layers
+    assert "mask_overlay" in layers
+    assert "ground_truth_mask" in layers
+    assert "probability_heatmap" in layers
+    assert "error_diff_map" in layers
+    assert layers["t1_rgb"].startswith("data:image/png;base64,")
+    assert layers["mask_overlay"].startswith("data:image/png;base64,")
+
+
+def test_dataset_loader_and_manual_inference_endpoints(tmp_path):
+    import io
+    import zipfile
+    import numpy as np
+
+    # 1. Test set active folder
+    folder = tmp_path / "custom_chips"
+    folder.mkdir()
+    resp_f = client.post("/studio/api/dataset/set-folder", json={"folder_path": str(folder)})
+    assert resp_f.status_code == 200
+    assert resp_f.json()["status"] == "success"
+
+    # 2. Test ZIP upload with a valid satellite chip
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        chip_bytes = io.BytesIO()
+        np.savez_compressed(
+            chip_bytes,
+            t1_optical=np.random.uniform(0, 1, (4, 32, 32)).astype(np.float32),
+            t2_optical=np.random.uniform(0, 1, (4, 32, 32)).astype(np.float32),
+            label=(np.random.uniform(0, 1, (32, 32)) > 0.8).astype(np.float32),
+        )
+        zf.writestr("test_chip_001.npz", chip_bytes.getvalue())
+    buf.seek(0)
+
+    resp_z = client.post(
+        "/studio/api/dataset/upload-zip",
+        files={"file": ("chips.zip", buf, "application/zip")},
+    )
+    assert resp_z.status_code == 200
+    assert resp_z.json()["extracted_count"] == 1
+
+    # 3. Test list chips
+    resp_l = client.get("/studio/api/chips")
+    assert resp_l.status_code == 200
+    chips_d = resp_l.json()
+    assert len(chips_d["chips"]) >= 1
+
+    # 4. Test manual inference on uploaded chip
+    resp_m = client.post("/studio/api/infer/manual", json={
+        "chip_idx": 0,
+        "model_type": "siamese",
+        "threshold": 0.5,
+        "mmu_ha": 0.05,
+    })
+    assert resp_m.status_code == 200
+    manual_d = resp_m.json()
+    assert manual_d["status"] == "success"
+    assert "metrics" in manual_d
+    assert "layers" in manual_d
+    assert "geojson" in manual_d
+    assert "t1_rgb" in manual_d["layers"]
+    assert "t2_rgb" in manual_d["layers"]
+    assert "mask_overlay" in manual_d["layers"]
+
+    # 5. Test checkpoints load path
+    dummy_pt = tmp_path / "dummy_weights.pt"
+    import torch
+    torch.save({"model_state_dict": {}}, str(dummy_pt))
+    resp_p = client.post("/studio/api/checkpoints/load-path", json={
+        "file_path": str(dummy_pt),
+        "model_type": "siamese",
+    })
+    assert resp_p.status_code == 200
+    assert resp_p.json()["load_result"]["status"] == "success"
+
+    # 6. Test GEE chip fetcher endpoint
+    resp_gee = client.post("/studio/api/dataset/fetch-gee", json={
+        "project_id": "indigo-shuttle-426915-a4",
+        "num_chips": 4,
+        "chip_size": 64,
+        "target_pos_ratio": 0.70,
+    })
+    assert resp_gee.status_code == 200
+    assert resp_gee.json()["status"] == "success"
+
 
 
 

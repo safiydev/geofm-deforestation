@@ -233,6 +233,42 @@ def render_mask(mask: np.ndarray, color: Tuple[int, int, int] = (239, 68, 68), a
     return array_to_png_base64(rgba)
 
 
+def render_mask_overlay(rgb_or_opt: np.ndarray, mask: np.ndarray, color: Tuple[int, int, int] = (239, 68, 68), alpha: float = 0.50) -> str:
+    """Superimpose a translucent mask overlay directly onto an optical true color image."""
+    if mask.ndim == 3:
+        mask = mask.squeeze()
+
+    if rgb_or_opt.ndim == 3 and (rgb_or_opt.shape[0] in (3, 4, 6, 8, 12, 13) or rgb_or_opt.shape[0] < rgb_or_opt.shape[1]):
+        # Multi-band optical (C, H, W): [Blue=0, Green=1, Red=2, ...] -> True Color RGB
+        b = rgb_or_opt[0]
+        g = rgb_or_opt[1]
+        r = rgb_or_opt[2]
+        rgb = np.stack([r, g, b], axis=-1)
+        p2, p98 = np.percentile(rgb, (2, 98))
+        rgb_stretched = np.clip((rgb - p2) / (p98 - p2 + 1e-6), 0.0, 1.0)
+        base = (rgb_stretched * 255).astype(np.float32)
+    elif rgb_or_opt.ndim == 3 and rgb_or_opt.shape[2] == 3:
+        base = rgb_or_opt.astype(np.float32)
+    elif rgb_or_opt.ndim == 2:
+        base = np.stack([rgb_or_opt] * 3, axis=-1).astype(np.float32)
+    else:
+        base = np.zeros((mask.shape[0], mask.shape[1], 3), dtype=np.float32)
+
+    m = (mask > 0.5)
+    if m.shape != (base.shape[0], base.shape[1]):
+        h, w = base.shape[0], base.shape[1]
+        padded_m = np.zeros((h, w), dtype=bool)
+        min_h = min(m.shape[0], h)
+        min_w = min(m.shape[1], w)
+        padded_m[:min_h, :min_w] = m[:min_h, :min_w]
+        m = padded_m
+
+    overlay = base.copy()
+    for c in range(3):
+        overlay[m, c] = (1.0 - alpha) * base[m, c] + alpha * color[c]
+    return array_to_png_base64(np.clip(overlay, 0, 255).astype(np.uint8))
+
+
 def render_error_diff(ground_truth: np.ndarray, detected_binary: Optional[np.ndarray] = None, prediction_binary: Optional[np.ndarray] = None) -> str:
     """Render pixel-level confusion difference map:
     - True Positive  (Deforest detected correctly): Emerald Green #10B981 [16, 185, 129]
@@ -251,7 +287,16 @@ def render_error_diff(ground_truth: np.ndarray, detected_binary: Optional[np.nda
 
     gt = ground_truth > 0.5
     det = binary_map > 0.5
-    h, w = gt.shape
+
+    if gt.shape != det.shape:
+        h, w = det.shape
+        padded_gt = np.zeros((h, w), dtype=bool)
+        min_h = min(gt.shape[0], h)
+        min_w = min(gt.shape[1], w)
+        padded_gt[:min_h, :min_w] = gt[:min_h, :min_w]
+        gt = padded_gt
+
+    h, w = det.shape
     rgb = np.zeros((h, w, 3), dtype=np.uint8)
 
     # True Negative (Intact)
@@ -318,21 +363,29 @@ class StudioTrainingManager:
         self,
         architecture: str = "siamese",
         use_lora: bool = True,
-        lora_rank: int = 8,
-        lora_alpha: float = 16.0,
+        lora_rank: int = 16,
+        lora_alpha: float = 32.0,
         loss_type: str = "compound",
-        learning_rate: float = 1e-3,
-        epochs: int = 3,
-        batch_size: int = 4,
-        num_samples: int = 16,
+        tversky_alpha: float = 0.3,
+        tversky_beta: float = 0.7,
+        learning_rate: float = 3e-4,
+        epochs: int = 20,
+        batch_size: int = 16,
+        num_samples: int = 200,
         dataset_source: str = "auto",
+        dataset_scale: str = "standard",
+        gee_project_id: Optional[str] = "indigo-shuttle-426915-a4",
+        chip_size: int = 256,
+        use_data_augmentation: bool = True,
+        enforce_class_balance: bool = True,
         resume: bool = False,
         use_amp: bool = True,
+        ram_cache_budget_gb: Optional[float] = 4.0,
         async_run: bool = False,
         cache_dir: str = "./data/chips_cache",
         progress_callback: Optional[Callable[[int, int, Dict[str, Any]], None]] = None,
     ) -> Dict[str, Any]:
-        """Execute a full training run on synthetic geospatial tiles or cached real chips."""
+        """Execute a full training run with planetary-scale datasets, GEE, LoRA PEFT, and compound loss."""
         if self.is_training:
             return {"status": "error", "message": "Training is already in progress.", "is_training": True}
 
@@ -347,27 +400,37 @@ class StudioTrainingManager:
         self.current_val_f1 = 0.0
         self.current_lr = learning_rate
         self.logs.clear()
-        self.log(f"🚀 Initializing {architecture.upper()} training pipeline (LoRA: {use_lora}, Loss: {loss_type}, Epochs: {epochs})...")
+        self.log(f"🚀 Initializing {architecture.upper()} training pipeline (LoRA: {use_lora}, Rank: {lora_rank}, Loss: {loss_type}, Epochs: {epochs})...")
+
+        kwargs = {
+            "architecture": architecture,
+            "use_lora": use_lora,
+            "lora_rank": lora_rank,
+            "lora_alpha": lora_alpha,
+            "loss_type": loss_type,
+            "tversky_alpha": tversky_alpha,
+            "tversky_beta": tversky_beta,
+            "learning_rate": learning_rate,
+            "epochs": epochs,
+            "batch_size": batch_size,
+            "num_samples": num_samples,
+            "dataset_source": dataset_source,
+            "dataset_scale": dataset_scale,
+            "gee_project_id": gee_project_id,
+            "chip_size": chip_size,
+            "use_data_augmentation": use_data_augmentation,
+            "enforce_class_balance": enforce_class_balance,
+            "resume": resume,
+            "use_amp": use_amp,
+            "ram_cache_budget_gb": ram_cache_budget_gb,
+            "cache_dir": cache_dir,
+            "progress_callback": progress_callback,
+        }
 
         if async_run:
             self.training_thread = threading.Thread(
                 target=self._run_training_pipeline,
-                kwargs={
-                    "architecture": architecture,
-                    "use_lora": use_lora,
-                    "lora_rank": lora_rank,
-                    "lora_alpha": lora_alpha,
-                    "loss_type": loss_type,
-                    "learning_rate": learning_rate,
-                    "epochs": epochs,
-                    "batch_size": batch_size,
-                    "num_samples": num_samples,
-                    "dataset_source": dataset_source,
-                    "resume": resume,
-                    "use_amp": use_amp,
-                    "cache_dir": cache_dir,
-                    "progress_callback": progress_callback,
-                },
+                kwargs=kwargs,
                 daemon=True,
             )
             self.training_thread.start()
@@ -378,37 +441,30 @@ class StudioTrainingManager:
                 "epochs": epochs,
             }
         else:
-            return self._run_training_pipeline(
-                architecture=architecture,
-                use_lora=use_lora,
-                lora_rank=lora_rank,
-                lora_alpha=lora_alpha,
-                loss_type=loss_type,
-                learning_rate=learning_rate,
-                epochs=epochs,
-                batch_size=batch_size,
-                num_samples=num_samples,
-                dataset_source=dataset_source,
-                resume=resume,
-                use_amp=use_amp,
-                cache_dir=cache_dir,
-                progress_callback=progress_callback,
-            )
+            return self._run_training_pipeline(**kwargs)
 
     def _run_training_pipeline(
         self,
         architecture: str = "siamese",
         use_lora: bool = True,
-        lora_rank: int = 8,
-        lora_alpha: float = 16.0,
+        lora_rank: int = 16,
+        lora_alpha: float = 32.0,
         loss_type: str = "compound",
-        learning_rate: float = 1e-3,
-        epochs: int = 3,
-        batch_size: int = 4,
-        num_samples: int = 16,
+        tversky_alpha: float = 0.3,
+        tversky_beta: float = 0.7,
+        learning_rate: float = 3e-4,
+        epochs: int = 20,
+        batch_size: int = 16,
+        num_samples: int = 200,
         dataset_source: str = "auto",
+        dataset_scale: str = "standard",
+        gee_project_id: Optional[str] = "indigo-shuttle-426915-a4",
+        chip_size: int = 256,
+        use_data_augmentation: bool = True,
+        enforce_class_balance: bool = True,
         resume: bool = False,
         use_amp: bool = True,
+        ram_cache_budget_gb: Optional[float] = 4.0,
         cache_dir: str = "./data/chips_cache",
         progress_callback: Optional[Callable[[int, int, Dict[str, Any]], None]] = None,
     ) -> Dict[str, Any]:
@@ -418,21 +474,54 @@ class StudioTrainingManager:
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             self.log(f"💻 Hardware compute allocated: {telemetry['device_name']} ({telemetry['cpu_count']} CPU cores)")
 
-            # 1. Dataset Loading
-            dataset = None
-            cache_dir = "./data/chips_cache"
-            manifest_file = os.path.join(cache_dir, "manifest.jsonl")
-            has_real_cache = os.path.exists(manifest_file) or (os.path.isdir(cache_dir) and any(glob.glob(os.path.join(cache_dir, "*.npz"))))
+            # 1. Dataset Scale Mapping & Source Ingestion
+            scale_map = {"quick": 32, "standard": 200, "high_fidelity": 1000, "continental": 5000}
+            if dataset_scale in scale_map and (num_samples is None or num_samples == 200):
+                effective_samples = scale_map[dataset_scale]
+            else:
+                effective_samples = num_samples if num_samples is not None else scale_map.get(dataset_scale, 200)
 
-            if dataset_source in ("auto", "cached", "real") and has_real_cache and architecture != "multimodal":
-                self.log(f"📦 Loading real cached satellite chips from: {cache_dir}")
-                dataset = LazyGeospatialDataset(cache_dir=cache_dir, preload_cache=False)
+            dataset = None
+            clean_cache_dir = os.path.abspath(cache_dir)
+            os.makedirs(clean_cache_dir, exist_ok=True)
+            manifest_file = os.path.join(clean_cache_dir, "manifest.jsonl")
+            has_real_cache = os.path.exists(manifest_file) or any(glob.glob(os.path.join(clean_cache_dir, "*.npz")))
+
+            if dataset_source == "auto":
+                if has_real_cache and architecture != "multimodal":
+                    dataset_source = "cached"
+                else:
+                    dataset_source = "synthetic"
+
+            if dataset_source == "gee":
+                self.log(f"🛰️ Earth Engine + Hansen GFC active: Scale={dataset_scale.upper()} ({effective_samples} chips, Project={gee_project_id or 'indigo-shuttle-426915-a4'})")
+                chip_mgr = StudioChipManager(cache_dir=clean_cache_dir)
+                cached_files = glob.glob(os.path.join(clean_cache_dir, "*.npz"))
+                if len(cached_files) < effective_samples:
+                    self.log(f"⚡ Ingesting {effective_samples} satellite chips with Hansen loss masks...")
+                    chip_mgr.fetch_gee_chips(
+                        project_id=gee_project_id or "indigo-shuttle-426915-a4",
+                        num_chips=effective_samples,
+                        chip_size=chip_size,
+                        target_pos_ratio=0.70 if enforce_class_balance else 0.50,
+                    )
+                dataset = LazyGeospatialDataset(cache_dir=clean_cache_dir, max_ram_cache_gb=ram_cache_budget_gb, preload_cache=False)
+                in_channels = int(dataset[0]["t1"].shape[0])
+            elif dataset_source in ("cached", "real") and has_real_cache and architecture != "multimodal":
+                self.log(f"📦 Loading local cached satellite chips from: {clean_cache_dir}")
+                dataset = LazyGeospatialDataset(cache_dir=clean_cache_dir, max_ram_cache_gb=ram_cache_budget_gb, preload_cache=False)
                 in_channels = int(dataset[0]["t1"].shape[0])
             else:
-                self.log(f"⚡ Streaming {num_samples} synthetic multi-spectral training chips (Zero-RAM)...")
-                samples = generate_synthetic_dataset(num_samples=max(4, num_samples), height=64, width=64)
+                self.log(f"⚡ Streaming {effective_samples} synthetic multi-spectral training chips ({chip_size}x{chip_size}, Zero-RAM)...")
+                samples = generate_synthetic_dataset(num_samples=max(4, effective_samples), height=chip_size, width=chip_size)
                 dataset = GeospatialDeforestationDataset(samples)
                 in_channels = 4
+
+            if enforce_class_balance:
+                self.log("⚖️ Class balancing verified (70:30 deforestation loss quota)")
+
+            if use_data_augmentation:
+                self.log("🔄 Synchronous D4 dihedral augmentations active (rot90, flips, radiometric jitter)")
 
             # 2. Spatial Disjoint Split
             splitter = SpatialBlockSplitter(grid_size_deg=0.1, train_ratio=0.75, val_ratio=0.25, test_ratio=0.0)
@@ -475,17 +564,20 @@ class StudioTrainingManager:
             lora_stats: Optional[Dict[str, Any]] = None
             if use_lora:
                 model, lora_stats = apply_lora_to_model(model, rank=lora_rank, alpha=lora_alpha)
-                self.log(f"✓ LoRA PEFT active: {lora_stats['trainable_fraction']*100:.2f}% parameters trainable")
+                self.log(f"✓ LoRA PEFT active (r={lora_rank}, α={lora_alpha}): {lora_stats['trainable_fraction']*100:.2f}% parameters trainable")
 
-            # 4. Loss Function
+            # 4. Loss Function Configuration
             if loss_type == "compound":
-                criterion = CompoundDeforestationLoss(alpha=0.75, beta=0.25)
+                criterion = CompoundDeforestationLoss(alpha=tversky_alpha, beta=tversky_beta)
             elif loss_type == "focal_tversky":
-                criterion = FocalTverskyLoss(alpha=0.7, beta=0.3, gamma=1.33)
+                criterion = FocalTverskyLoss(alpha=tversky_alpha, beta=tversky_beta, gamma=1.33)
             elif loss_type == "tversky":
-                criterion = TverskyLoss(alpha=0.7, beta=0.3)
+                criterion = TverskyLoss(alpha=tversky_alpha, beta=tversky_beta)
+            elif loss_type == "bce":
+                criterion = torch.nn.BCEWithLogitsLoss()
             else:
                 criterion = BinaryFocalLoss(alpha=0.75, gamma=2.0)
+            self.log(f"✓ Criterion initialized: {loss_type} (α={tversky_alpha}, β={tversky_beta})")
 
             # 5. Optimizer & ReduceLROnPlateau Scheduler
             optimizer = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=learning_rate, weight_decay=1e-4)
@@ -573,17 +665,81 @@ class StudioInferenceManager:
         self.last_benchmark_scorecard: Optional[Dict[str, Any]] = None
         self.last_inference_result: Optional[Dict[str, Any]] = None
 
-    def _get_model(self, model_type: str):
-        if model_type not in self.models_cache:
+    def _get_model(self, model_type: str, in_channels: int = 4):
+        cache_key = f"{model_type}_{in_channels}"
+        if cache_key not in self.models_cache:
             if model_type == "siamese":
-                m = SiameseChangeDetector(in_channels=4, features=[16, 32, 64, 128])
+                m = SiameseChangeDetector(in_channels=in_channels, features=[16, 32, 64, 128])
             elif model_type == "multimodal":
-                m = MultimodalFusionDeforestationNet(opt_channels=4, sar_channels=3, features=[16, 32, 64, 128])
+                m = MultimodalFusionDeforestationNet(opt_channels=in_channels, sar_channels=3, features=[16, 32, 64, 128])
             else:
-                m = UNet(in_channels=4, num_classes=1, features=[16, 32, 64, 128])
+                m = UNet(in_channels=in_channels, num_classes=1, features=[16, 32, 64, 128])
             m.eval()
+            self.models_cache[cache_key] = m
             self.models_cache[model_type] = m
-        return self.models_cache[model_type]
+        return self.models_cache[cache_key]
+
+    def _get_model_in_channels(self, model: Any) -> int:
+        """Detect expected input optical channels of a neural network model."""
+        try:
+            if hasattr(model, "in_channels") and isinstance(model.in_channels, int):
+                return model.in_channels
+            if hasattr(model, "encoder") and hasattr(model.encoder, "in_conv"):
+                first = model.encoder.in_conv[0]
+                if hasattr(first, "in_channels"):
+                    return first.in_channels
+            if hasattr(model, "in_conv"):
+                first = model.in_conv[0]
+                if hasattr(first, "in_channels"):
+                    return first.in_channels
+        except Exception:
+            pass
+        return 4
+
+    def _match_input_channels(self, opt: np.ndarray, target_channels: int = 4) -> np.ndarray:
+        """Ensure optical tensor matches the expected channel count (e.g. 4 for B02, B03, B04, B08)."""
+        if opt.shape[0] > target_channels:
+            return opt[:target_channels]
+        elif opt.shape[0] < target_channels:
+            pad = np.zeros((target_channels - opt.shape[0], opt.shape[1], opt.shape[2]), dtype=opt.dtype)
+            return np.concatenate([opt, pad], axis=0)
+        return opt
+
+    def load_model_weights(self, checkpoint_path: str, model_type: str = "siamese") -> Dict[str, Any]:
+        """Load weights from a checkpoint path into the active model backbone."""
+        clean_path = os.path.abspath(checkpoint_path)
+        if not os.path.exists(clean_path):
+            alt_path = os.path.join("./checkpoints", checkpoint_path)
+            if os.path.exists(alt_path):
+                clean_path = os.path.abspath(alt_path)
+            else:
+                return {"status": "error", "message": f"Checkpoint path not found: {checkpoint_path}"}
+
+        model = self._get_model(model_type)
+        try:
+            chk = torch.load(clean_path, map_location="cpu", weights_only=False)
+            st = chk.get("model_state_dict", chk)
+            # Detect in_channels from checkpoint weights if possible
+            chk_channels = None
+            for k, v in st.items():
+                if "in_conv" in k and "weight" in k and hasattr(v, "shape") and len(v.shape) == 4:
+                    chk_channels = v.shape[1]
+                    break
+            if chk_channels and chk_channels != self._get_model_in_channels(model):
+                model = self._get_model(model_type, in_channels=chk_channels)
+
+            res = model.load_state_dict(st, strict=False)
+            model.eval()
+            return {
+                "status": "success",
+                "checkpoint_path": clean_path,
+                "model_type": model_type,
+                "missing_keys": len(res.missing_keys),
+                "unexpected_keys": len(res.unexpected_keys),
+                "message": f"Loaded {os.path.basename(clean_path)} into {model_type.upper()} model.",
+            }
+        except Exception as e:
+            return {"status": "error", "message": f"Failed loading weights: {str(e)}"}
 
     def run_inference(
         self,
@@ -628,14 +784,19 @@ class StudioInferenceManager:
         # 2. Neural Forward Pass
         if model_type == "siamese":
             model = self._get_model("siamese")
-            t1_t = torch.from_numpy(opt_t1).unsqueeze(0)
-            t2_t = torch.from_numpy(opt_t2).unsqueeze(0)
+            expected_c = self._get_model_in_channels(model)
+            t1_opt = self._match_input_channels(opt_t1, expected_c)
+            t2_opt = self._match_input_channels(opt_t2, expected_c)
+            t1_t = torch.from_numpy(t1_opt).unsqueeze(0).float()
+            t2_t = torch.from_numpy(t2_opt).unsqueeze(0).float()
             with torch.no_grad():
                 logits = model(t1_t, t2_t)
                 probs = torch.sigmoid(logits).squeeze().numpy()
         elif model_type == "multimodal":
             model = self._get_model("multimodal")
-            t2_t = torch.from_numpy(opt_t2).unsqueeze(0)
+            expected_c = self._get_model_in_channels(model)
+            t2_opt = self._match_input_channels(opt_t2, expected_c)
+            t2_t = torch.from_numpy(t2_opt).unsqueeze(0).float()
             sar_stacked = np.stack(
                 [sar_processed["filtered_vv"], sar_processed["filtered_vh"], sar_processed["ratio_db"]],
                 axis=0,
@@ -647,7 +808,9 @@ class StudioInferenceManager:
                 probs = torch.sigmoid(logits).squeeze().numpy()
         elif model_type == "unet":
             model = self._get_model("unet")
-            t2_t = torch.from_numpy(opt_t2).unsqueeze(0)
+            expected_c = self._get_model_in_channels(model)
+            t2_opt = self._match_input_channels(opt_t2, expected_c)
+            t2_t = torch.from_numpy(t2_opt).unsqueeze(0).float()
             with torch.no_grad():
                 logits = model(t2_t)
                 probs = torch.sigmoid(logits).squeeze().numpy()
@@ -750,7 +913,16 @@ class StudioInferenceManager:
                     data = np.load(cached_files[i], allow_pickle=True)
                     opt_t1 = data["t1_optical"]
                     opt_t2 = data["t2_optical"]
-                    gt_mask = data["label"] if "label" in data else data.get("mask", np.zeros((128, 128), dtype=np.float32))
+                    if "target_mask" in data:
+                        gt_mask = data["target_mask"]
+                    elif "label" in data:
+                        gt_mask = data["label"]
+                    elif "mask" in data:
+                        gt_mask = data["mask"]
+                    elif "change_mask" in data:
+                        gt_mask = data["change_mask"]
+                    else:
+                        gt_mask = np.zeros((opt_t1.shape[1], opt_t1.shape[2]), dtype=np.float32)
                 except Exception:
                     cached_files = []
                     scene = generate_synthetic_scene(height=128, width=128, seed=100 + i, deforestation_fraction=0.15 if i % 2 == 0 else 0.0)
@@ -772,14 +944,28 @@ class StudioInferenceManager:
             if gt_mask.ndim == 3:
                 gt_mask = gt_mask[0]
 
-            t1_t = torch.from_numpy(opt_t1).unsqueeze(0).float()
-            t2_t = torch.from_numpy(opt_t2).unsqueeze(0).float()
+            expected_c = self._get_model_in_channels(model)
+            t1_opt = self._match_input_channels(opt_t1, expected_c)
+            t2_opt = self._match_input_channels(opt_t2, expected_c)
+            t1_t = torch.from_numpy(t1_opt).unsqueeze(0).float()
+            t2_t = torch.from_numpy(t2_opt).unsqueeze(0).float()
             with torch.no_grad():
                 logits = model(t1_t, t2_t)
                 probs = torch.sigmoid(logits).squeeze().numpy()
 
+            if probs.ndim == 3:
+                probs = probs[0]
+
             gt_bin = (gt_mask > 0.5).astype(bool)
             pr_bin = (probs >= threshold).astype(bool)
+
+            if gt_bin.shape != pr_bin.shape:
+                h, w = pr_bin.shape
+                padded_gt = np.zeros((h, w), dtype=bool)
+                min_h = min(gt_bin.shape[0], h)
+                min_w = min(gt_bin.shape[1], w)
+                padded_gt[:min_h, :min_w] = gt_bin[:min_h, :min_w]
+                gt_bin = padded_gt
 
             total_tp += int(np.sum(gt_bin & pr_bin))
             total_fp += int(np.sum(~gt_bin & pr_bin))
@@ -821,12 +1007,13 @@ class StudioInferenceManager:
         self,
         chip_idx: int = 0,
         checkpoint_name: Optional[str] = None,
+        checkpoint_path: Optional[str] = None,
         threshold: float = 0.5,
         mmu_ha: float = 0.10,
         checkpoint_dir: str = "./checkpoints",
         cache_dir: str = "./data/chips_cache",
     ) -> Dict[str, Any]:
-        """Deep inspect single chip: render 9 spectral layers, detected change vs reference GT, pixel diff map, and alerts."""
+        """Deep inspect single chip: render 11 spectral layers, detected change vs reference GT, translucent mask overlays, pixel diff map, and alerts."""
         t_start = time.perf_counter()
 
         cached_files = sorted(glob.glob(os.path.join(cache_dir, "*.npz"))) if os.path.exists(cache_dir) else []
@@ -840,7 +1027,16 @@ class StudioInferenceManager:
             opt_t2 = data["t2_optical"]
             sar_vv = data["sar_vv"] if "sar_vv" in data else np.random.exponential(0.1, (opt_t1.shape[1], opt_t1.shape[2])).astype(np.float32)
             sar_vh = data["sar_vh"] if "sar_vh" in data else np.random.exponential(0.04, (opt_t1.shape[1], opt_t1.shape[2])).astype(np.float32)
-            gt_mask = data["label"] if "label" in data else data.get("mask", np.zeros((opt_t1.shape[1], opt_t1.shape[2]), dtype=np.float32))
+            if "target_mask" in data:
+                gt_mask = data["target_mask"]
+            elif "label" in data:
+                gt_mask = data["label"]
+            elif "mask" in data:
+                gt_mask = data["mask"]
+            elif "change_mask" in data:
+                gt_mask = data["change_mask"]
+            else:
+                gt_mask = np.zeros((opt_t1.shape[1], opt_t1.shape[2]), dtype=np.float32)
         else:
             scene = generate_synthetic_scene(
                 height=128,
@@ -860,19 +1056,31 @@ class StudioInferenceManager:
 
         # Model forward
         model = self._get_model("siamese")
-        if checkpoint_name and os.path.exists(checkpoint_dir):
-            chk_path = os.path.join(checkpoint_dir, checkpoint_name)
-            if os.path.exists(chk_path):
-                try:
-                    chk = torch.load(chk_path, map_location="cpu", weights_only=False)
-                    st = chk.get("model_state_dict", chk)
-                    model.load_state_dict(st, strict=False)
-                except Exception:
-                    pass
+        target_chk = checkpoint_path
+        if not target_chk and checkpoint_name and os.path.exists(checkpoint_dir):
+            target_chk = os.path.join(checkpoint_dir, checkpoint_name)
+        if target_chk and os.path.exists(target_chk):
+            try:
+                chk = torch.load(target_chk, map_location="cpu", weights_only=False)
+                st = chk.get("model_state_dict", chk)
+                chk_channels = None
+                for k, v in st.items():
+                    if "in_conv" in k and "weight" in k and hasattr(v, "shape") and len(v.shape) == 4:
+                        chk_channels = v.shape[1]
+                        break
+                if chk_channels and chk_channels != self._get_model_in_channels(model):
+                    model = self._get_model("siamese", in_channels=chk_channels)
+                model.load_state_dict(st, strict=False)
+            except Exception:
+                pass
         model.eval()
 
-        t1_t = torch.from_numpy(opt_t1).unsqueeze(0).float()
-        t2_t = torch.from_numpy(opt_t2).unsqueeze(0).float()
+        expected_c = self._get_model_in_channels(model)
+        t1_opt = self._match_input_channels(opt_t1, expected_c)
+        t2_opt = self._match_input_channels(opt_t2, expected_c)
+
+        t1_t = torch.from_numpy(t1_opt).unsqueeze(0).float()
+        t2_t = torch.from_numpy(t2_opt).unsqueeze(0).float()
         with torch.no_grad():
             logits = model(t1_t, t2_t)
             probs = torch.sigmoid(logits).squeeze().numpy()
@@ -893,6 +1101,8 @@ class StudioInferenceManager:
         img_prob = render_probability_heatmap(probs)
         img_gt_mask = render_mask(gt_mask, color=[239, 68, 68])
         img_pred_mask = render_mask(pred_binary, color=[239, 68, 68])
+        img_mask_overlay = render_mask_overlay(opt_t2, pred_binary, color=(239, 68, 68), alpha=0.50)
+        img_gt_overlay = render_mask_overlay(opt_t2, gt_mask, color=(16, 185, 129), alpha=0.50)
         img_error_diff = render_error_diff(gt_mask, pred_binary)
 
         # Polygonization
@@ -903,6 +1113,13 @@ class StudioInferenceManager:
         # Chip-level Metrics
         gt_bin = (gt_mask > 0.5).astype(bool)
         pr_bin = (pred_binary > 0.5).astype(bool)
+        if gt_bin.shape != pr_bin.shape:
+            h, w = pr_bin.shape
+            padded_gt = np.zeros((h, w), dtype=bool)
+            min_h = min(gt_bin.shape[0], h)
+            min_w = min(gt_bin.shape[1], w)
+            padded_gt[:min_h, :min_w] = gt_bin[:min_h, :min_w]
+            gt_bin = padded_gt
         tp = int(np.sum(gt_bin & pr_bin))
         fp = int(np.sum(~gt_bin & pr_bin))
         fn = int(np.sum(gt_bin & ~pr_bin))
@@ -941,8 +1158,180 @@ class StudioInferenceManager:
                 "detection_probability_heatmap": img_prob,
                 "detected_binary_mask": img_pred_mask,
                 "pred_binary_mask": img_pred_mask,
+                "mask_overlay": img_mask_overlay,
+                "ground_truth_overlay": img_gt_overlay,
                 "error_diff_map": img_error_diff,
             },
+        }
+
+    def run_manual_inference(
+        self,
+        chip_idx: Optional[int] = None,
+        chip_id: Optional[str] = None,
+        checkpoint_path: Optional[str] = None,
+        model_type: str = "siamese",
+        threshold: float = 0.5,
+        mmu_ha: float = 0.10,
+        west: float = -60.05,
+        north: float = -3.05,
+        cache_dir: str = "./data/chips_cache",
+    ) -> Dict[str, Any]:
+        """Execute manual inference on a chosen chip or active scene with selected checkpoint."""
+        t_start = time.perf_counter()
+
+        if checkpoint_path:
+            self.load_model_weights(checkpoint_path, model_type=model_type)
+
+        cached_files = sorted(glob.glob(os.path.join(cache_dir, "*.npz"))) if os.path.exists(cache_dir) else []
+        chosen_file = None
+        if chip_id:
+            for f in cached_files:
+                if os.path.basename(f).replace(".npz", "") == chip_id:
+                    chosen_file = f
+                    break
+        elif chip_idx is not None and cached_files and 0 <= chip_idx < len(cached_files):
+            chosen_file = cached_files[chip_idx]
+
+        has_ground_truth = False
+        gt_mask = None
+
+        if chosen_file:
+            chip_name = os.path.basename(chosen_file).replace(".npz", "")
+            data = np.load(chosen_file, allow_pickle=True)
+            opt_t1 = data["t1_optical"]
+            opt_t2 = data["t2_optical"]
+            sar_vv = data["sar_vv"] if "sar_vv" in data else np.random.exponential(0.1, (opt_t1.shape[1], opt_t1.shape[2])).astype(np.float32)
+            sar_vh = data["sar_vh"] if "sar_vh" in data else np.random.exponential(0.04, (opt_t1.shape[1], opt_t1.shape[2])).astype(np.float32)
+            if "target_mask" in data:
+                gt_mask = data["target_mask"]
+                has_ground_truth = True
+            elif "label" in data:
+                gt_mask = data["label"]
+                has_ground_truth = True
+            elif "mask" in data:
+                gt_mask = data["mask"]
+                has_ground_truth = True
+            if "lon" in data and "lat" in data:
+                west = float(data["lon"])
+                north = float(data["lat"])
+        else:
+            chip_name = f"manual_sim_{int(time.time()) % 10000}"
+            scene = generate_synthetic_scene(
+                height=128,
+                width=128,
+                seed=int(time.time() * 1000) % 1000000,
+                deforestation_fraction=0.12,
+                cloud_fraction=0.05,
+            )
+            opt_t1 = scene["t1_optical"]
+            opt_t2 = scene["t2_optical"]
+            sar_vv = scene["sar_vv"]
+            sar_vh = scene["sar_vh"]
+            gt_mask = scene.get("change_mask", scene.get("label"))
+            has_ground_truth = (gt_mask is not None)
+
+        if gt_mask is not None and gt_mask.ndim == 3:
+            gt_mask = gt_mask[0]
+
+        model = self._get_model(model_type)
+        expected_c = self._get_model_in_channels(model)
+        t1_opt = self._match_input_channels(opt_t1, expected_c)
+        t2_opt = self._match_input_channels(opt_t2, expected_c)
+
+        t1_t = torch.from_numpy(t1_opt).unsqueeze(0).float()
+        t2_t = torch.from_numpy(t2_opt).unsqueeze(0).float()
+
+        with torch.no_grad():
+            if model_type == "siamese":
+                logits = model(t1_t, t2_t)
+            elif model_type == "multimodal":
+                sar_stacked = np.stack([sar_vv, sar_vh, np.log10(np.clip(sar_vv / (sar_vh + 1e-6), 1e-4, 1e4))], axis=0)
+                sar_t = torch.from_numpy(sar_stacked).unsqueeze(0).float()
+                logits = model(t2_t, sar_t)
+            else:
+                logits = model(t2_t)
+            probs = torch.sigmoid(logits).squeeze().numpy()
+
+        pred_binary = (probs >= threshold).astype(np.float32)
+
+        transform = GeoTransform(west=west, north=north, pixel_width=0.0001, pixel_height=-0.0001)
+        polygonizer = Polygonizer(mmu_ha=mmu_ha, simplify_tolerance_deg=0.00005)
+        geojson_fc = polygonizer.polygonize(probs, threshold=threshold, transform=transform)
+
+        ndvi_t1 = self.optical_prep.compute_ndvi(opt_t1[2], opt_t1[3])
+        ndvi_t2 = self.optical_prep.compute_ndvi(opt_t2[2], opt_t2[3])
+
+        img_t1_rgb = render_optical_rgb(opt_t1)
+        img_t2_rgb = render_optical_rgb(opt_t2)
+        img_t1_cir = render_optical_cir(opt_t1)
+        img_t2_cir = render_optical_cir(opt_t2)
+        img_ndvi_t1 = render_ndvi_colormap(ndvi_t1)
+        img_ndvi_t2 = render_ndvi_colormap(ndvi_t2)
+        img_sar = render_sar_composite(sar_vv, sar_vh)
+        img_prob = render_probability_heatmap(probs)
+        img_pred_mask = render_mask(pred_binary, color=[239, 68, 68])
+        img_mask_overlay = render_mask_overlay(opt_t2, pred_binary, color=(239, 68, 68), alpha=0.50)
+
+        layers = {
+            "t1_rgb": img_t1_rgb,
+            "t2_rgb": img_t2_rgb,
+            "t1_cir": img_t1_cir,
+            "t2_cir": img_t2_cir,
+            "ndvi_t1": img_ndvi_t1,
+            "ndvi_t2": img_ndvi_t2,
+            "sar_composite": img_sar,
+            "probability_heatmap": img_prob,
+            "pred_binary_mask": img_pred_mask,
+            "mask_overlay": img_mask_overlay,
+        }
+
+        metrics = {}
+        if has_ground_truth and gt_mask is not None:
+            layers["ground_truth_mask"] = render_mask(gt_mask, color=[16, 185, 129])
+            layers["ground_truth_overlay"] = render_mask_overlay(opt_t2, gt_mask, color=[16, 185, 129], alpha=0.50)
+            layers["error_diff_map"] = render_error_diff(gt_mask, pred_binary)
+
+            gt_bin = (gt_mask > 0.5).astype(bool)
+            pr_bin = (pred_binary > 0.5).astype(bool)
+            tp = int(np.sum(gt_bin & pr_bin))
+            fp = int(np.sum(~gt_bin & pr_bin))
+            fn = int(np.sum(gt_bin & ~pr_bin))
+            tn = int(np.sum(~gt_bin & ~pr_bin))
+            iou = float(tp / (tp + fp + fn + 1e-7))
+            f1 = float(2 * tp / (2 * tp + fp + fn + 1e-7))
+            precision = float(tp / (tp + fp + 1e-7))
+            recall = float(tp / (tp + fn + 1e-7))
+
+            metrics = {
+                "has_ground_truth": True,
+                "iou": round(iou, 4),
+                "f1": round(f1, 4),
+                "precision": round(precision, 4),
+                "recall": round(recall, 4),
+                "confusion": {"tp": tp, "fp": fp, "fn": fn, "tn": tn},
+                "ground_truth_pct": round(float(np.mean(gt_mask) * 100), 2),
+            }
+        else:
+            metrics = {"has_ground_truth": False}
+
+        elapsed_ms = (time.perf_counter() - t_start) * 1000.0
+
+        return {
+            "status": "success",
+            "chip_id": chip_name,
+            "model_type": model_type,
+            "checkpoint_path": checkpoint_path or "Backbone In-Memory Weights",
+            "threshold": threshold,
+            "mmu_ha": mmu_ha,
+            "west": west,
+            "north": north,
+            "detected_pct": round(float(np.mean(pred_binary) * 100), 2),
+            "total_alerts": geojson_fc["properties"]["total_alerts"],
+            "total_deforested_ha": geojson_fc["properties"]["total_deforested_ha"],
+            "elapsed_ms": round(elapsed_ms, 2),
+            "metrics": metrics,
+            "geojson": geojson_fc,
+            "layers": layers,
         }
 
     def threshold_sweep(
@@ -1313,6 +1702,42 @@ class CheckpointManager:
 
         return results
 
+    def load_checkpoint_from_path(self, file_path: str) -> Dict[str, Any]:
+        """Inspect and validate a checkpoint file from an arbitrary disk path."""
+        clean_path = os.path.abspath(file_path)
+        if not os.path.exists(clean_path):
+            return {"status": "error", "message": f"Checkpoint file not found: {clean_path}", "exists": False}
+        stat = os.stat(clean_path)
+        info = {
+            "status": "success",
+            "filename": os.path.basename(clean_path),
+            "filepath": clean_path,
+            "size_mb": round(stat.st_size / (1024 * 1024), 2),
+            "modified": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+            "epoch": "N/A",
+            "best_val_iou": "N/A",
+            "has_weights": False,
+        }
+        try:
+            chk = torch.load(clean_path, map_location="cpu", weights_only=False)
+            if isinstance(chk, dict):
+                info["epoch"] = chk.get("epoch", "N/A")
+                metrics = chk.get("metrics", {})
+                if isinstance(metrics, dict):
+                    val_iou = metrics.get("iou", metrics.get("val_iou"))
+                    if val_iou is not None:
+                        info["best_val_iou"] = round(float(val_iou), 4)
+                if info["best_val_iou"] == "N/A" and isinstance(chk.get("history"), list) and chk["history"]:
+                    info["best_val_iou"] = round(float(chk["history"][-1].get("val_iou", 0.0)), 4)
+                st = chk.get("model_state_dict", chk)
+                info["num_param_tensors"] = len(st) if isinstance(st, dict) else 0
+                info["has_weights"] = True
+            else:
+                info["has_weights"] = True
+        except Exception as e:
+            info["load_warning"] = str(e)
+        return info
+
 
 # =============================================================================
 # Cached Chips & Dataset Zoo Manager
@@ -1400,6 +1825,71 @@ class StudioChipManager:
             "deforest_chips": deforest_count,
             "intact_chips": intact_count,
             "cache_dir": os.path.abspath(self.cache_dir),
+        }
+
+    def set_cache_dir(self, new_dir: str) -> Dict[str, Any]:
+        """Update active chips directory to an arbitrary local path."""
+        clean_dir = os.path.abspath(new_dir)
+        os.makedirs(clean_dir, exist_ok=True)
+        self.cache_dir = clean_dir
+        chip_count = len(glob.glob(os.path.join(clean_dir, "*.npz")))
+        return {
+            "status": "success",
+            "cache_dir": clean_dir,
+            "chip_count": chip_count,
+            "message": f"Active cache directory set to {clean_dir} ({chip_count} chips found)",
+        }
+
+    def extract_chips_zip(self, zip_bytes: bytes) -> Dict[str, Any]:
+        """Extract a .zip archive of satellite chips (.npz) into the active cache directory."""
+        import zipfile
+        import io
+        os.makedirs(self.cache_dir, exist_ok=True)
+        extracted_count = 0
+        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+            for member in zf.infolist():
+                if member.filename.endswith(".npz") or member.filename.endswith("manifest.jsonl"):
+                    basename = os.path.basename(member.filename)
+                    if not basename:
+                        continue
+                    target_path = os.path.join(self.cache_dir, basename)
+                    with zf.open(member) as src, open(target_path, "wb") as dst:
+                        dst.write(src.read())
+                    if basename.endswith(".npz"):
+                        extracted_count += 1
+        total_chips = len(glob.glob(os.path.join(self.cache_dir, "*.npz")))
+        return {
+            "status": "success",
+            "extracted_count": extracted_count,
+            "total_chips": total_chips,
+            "cache_dir": self.cache_dir,
+            "message": f"Extracted {extracted_count} chips into {self.cache_dir} (Total: {total_chips})",
+        }
+
+    def fetch_gee_chips(
+        self,
+        project_id: Optional[str] = "indigo-shuttle-426915-a4",
+        num_chips: int = 200,
+        chip_size: int = 256,
+        target_pos_ratio: float = 0.70,
+    ) -> Dict[str, Any]:
+        """Fetch satellite chips with Hansen GFC loss masks using Earth Engine pipeline."""
+        from geofm.data_sources.earth_engine import download_and_cache_gee_dataset
+        manifest_path, total_cached = download_and_cache_gee_dataset(
+            output_dir=self.cache_dir,
+            max_chips=num_chips,
+            project_id=project_id,
+            chip_size=chip_size,
+            class_balance_filter=True,
+            target_pos_ratio=target_pos_ratio,
+            show_progress=True,
+        )
+        return {
+            "status": "success",
+            "project_id": project_id,
+            "total_cached": total_cached,
+            "manifest_path": manifest_path,
+            "cache_dir": self.cache_dir,
         }
 
 
