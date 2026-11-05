@@ -636,4 +636,61 @@ def test_pure_array_to_png_base64_zero_dependency(monkeypatch):
     assert raw_fallback.startswith(b"\x89PNG\r\n\x1a\n")
 
 
+def test_dynamic_hardware_telemetry(monkeypatch):
+    import platform
+    from geofm.studio.core import get_hardware_telemetry
+
+    # Test real host telemetry
+    t = get_hardware_telemetry()
+    assert "device_name" in t
+    assert "cpu_count" in t
+    assert "ram_total_mb" in t
+    assert "os_name" in t
+    assert "architecture" in t
+
+    # Simulate Windows x86_64 CPU environment
+    monkeypatch.setattr(platform, "system", lambda: "Windows")
+    monkeypatch.setattr(platform, "machine", lambda: "AMD64")
+    monkeypatch.setattr(platform, "release", lambda: "11")
+    monkeypatch.setattr("torch.cuda.is_available", lambda: False)
+
+    win_t = get_hardware_telemetry()
+    assert win_t["device_name"] == "CPU Host (x86_64 / Windows 11)"
+    assert win_t["architecture"] == "x86_64"
+    assert win_t["os_name"] == "Windows"
+
+
+def test_dynamic_infer_and_olofsson_endpoints():
+    # Test infer with custom coordinates and seed
+    resp = client.post("/studio/api/infer", json={
+        "model_type": "siamese",
+        "deforestation_fraction": 0.05,
+        "cloud_fraction": 0.02,
+        "west": 18.30,
+        "north": 0.50,
+        "seed": 9999
+    })
+    assert resp.status_code == 200
+    d = resp.json()
+    assert d["west"] == 18.30
+    assert d["north"] == 0.50
+    assert d["seed"] == 9999
+
+    # Test Olofsson with custom counts
+    resp_olof = client.post("/studio/api/olofsson", json={
+        "source": "custom",
+        "tp": 100,
+        "fp": 10,
+        "fn": 5,
+        "tn": 400,
+        "stratum_deforest_ha": 1500.0,
+        "stratum_forest_ha": 18500.0
+    })
+    assert resp_olof.status_code == 200
+    olof_d = resp_olof.json()
+    assert "overall_accuracy_pct" in olof_d
+    assert olof_d["overall_accuracy_pct"] > 90.0
+
+
+
 

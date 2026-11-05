@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from pydantic import BaseModel, Field
 import torch
+import numpy as np
 
 from geofm.compliance.eudr import EUDR_REGULATED_COMMODITIES
 from geofm.studio.core import (
@@ -80,6 +81,17 @@ class InferRequest(BaseModel):
     mmu_ha: float = Field(default=0.10)
     west: float = Field(default=-60.05)
     north: float = Field(default=-3.05)
+    seed: Optional[int] = Field(default=None)
+
+
+class OlofssonRequest(BaseModel):
+    source: str = Field(default="reference")  # "reference", "benchmark", "custom"
+    tp: Optional[int] = Field(default=None)
+    fp: Optional[int] = Field(default=None)
+    fn: Optional[int] = Field(default=None)
+    tn: Optional[int] = Field(default=None)
+    stratum_deforest_ha: Optional[float] = Field(default=1250.0)
+    stratum_forest_ha: Optional[float] = Field(default=18750.0)
 
 
 class AUDITRequest(BaseModel):
@@ -806,6 +818,31 @@ STUDIO_HTML = """<!DOCTYPE html>
           <div class="card">
             <div class="card-title">Geospatial Bitemporal Change Simulation</div>
             <div class="form-group">
+              <label>Target Deforestation Hotspot / Region</label>
+              <select id="mapHotspotSelect" onchange="onHotspotChange()">
+                <option value="amazon_arc" selected>Amazon Arc of Deforestation (Manaus, Brazil) [-3.05, -60.05]</option>
+                <option value="congo_basin">Congo Basin Rainforest (DR Congo) [0.50, 18.30]</option>
+                <option value="borneo_kalimantan">Borneo Peatland Frontier (Kalimantan, Indonesia) [-2.20, 113.90]</option>
+                <option value="cerrado_matopiba">Cerrado MATOPIBA Soy Belt (Brazil) [-10.10, -45.50]</option>
+                <option value="gran_chaco">Gran Chaco Dry Tropical Forest (Paraguay/Argentina) [-24.30, -62.10]</option>
+                <option value="custom">Custom Geographic Coordinates (Click on Map)</option>
+              </select>
+            </div>
+            <div class="grid-2-equal">
+              <div class="form-group">
+                <label>Longitude (West/East)</label>
+                <input type="number" step="0.001" id="mapWest" class="form-control" value="-60.05">
+              </div>
+              <div class="form-group">
+                <label>Latitude (North/South)</label>
+                <input type="number" step="0.001" id="mapNorth" class="form-control" value="-3.05">
+              </div>
+            </div>
+            <div class="checkbox-row" style="margin-bottom:0.75rem;">
+              <input type="checkbox" id="mapRandomSeed" checked>
+              <label for="mapRandomSeed">Dynamic Bitemporal Scene (Randomize Satellite Passes)</label>
+            </div>
+            <div class="form-group">
               <label>Change Detection Engine</label>
               <select id="mapModelType">
                 <option value="siamese" selected>Bitemporal Siamese Change Detector</option>
@@ -864,6 +901,12 @@ STUDIO_HTML = """<!DOCTYPE html>
         <div>
           <div class="card">
             <div class="card-title">Due Diligence Audit (EUDR)</div>
+            <div style="margin-bottom:0.75rem;">
+              <button class="btn btn-cyan btn-block" onclick="importActiveAlertsToEUDR()">
+                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><polygon points="1 6 1 22 8 18 16 22 23 18 23 2 16 6 8 2 1 6"></polygon></svg>
+                Import Detected Alerts from Map into Audit
+              </button>
+            </div>
             <div class="form-group">
               <label>Regulatory Preset Scenarios</label>
               <select id="eudrPresetSelect" onchange="applyPresetScenario()">
@@ -900,7 +943,20 @@ STUDIO_HTML = """<!DOCTYPE html>
               <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
               Execute Due Diligence Audit
             </button>
-            <div style="margin-top:0.65rem;">
+            <div class="grid-2-equal" style="margin-top:0.75rem;">
+              <div class="form-group" style="margin-bottom:0;">
+                <label>Olofsson Sample Source</label>
+                <select id="olofSource" class="form-control" style="font-size:0.75rem;">
+                  <option value="reference" selected>Reference Benchmark (Olofsson 2014)</option>
+                  <option value="benchmark">Live Model Benchmark Matrix</option>
+                </select>
+              </div>
+              <div class="form-group" style="margin-bottom:0;">
+                <label>Stratum Forest Area (ha)</label>
+                <input type="number" id="olofTotalArea" class="form-control" value="18750" style="font-size:0.75rem;">
+              </div>
+            </div>
+            <div style="margin-top:0.5rem;">
               <button class="btn btn-secondary btn-block" onclick="executeOlofsson()">
                 Compute Olofsson Stratified Accuracy (95% CI)
               </button>
@@ -1055,7 +1111,25 @@ STUDIO_HTML = """<!DOCTYPE html>
       });
     }
 
-    // Map Initialization
+    // Hotspot Regions & Map Initialization
+    const HOTSPOTS = {
+      amazon_arc: [-3.05, -60.05, 11],
+      congo_basin: [0.50, 18.30, 11],
+      borneo_kalimantan: [-2.20, 113.90, 11],
+      cerrado_matopiba: [-10.10, -45.50, 11],
+      gran_chaco: [-24.30, -62.10, 11]
+    };
+
+    function onHotspotChange() {
+      const key = document.getElementById('mapHotspotSelect').value;
+      if (HOTSPOTS[key]) {
+        const [lat, lng, zoom] = HOTSPOTS[key];
+        document.getElementById('mapNorth').value = lat.toFixed(4);
+        document.getElementById('mapWest').value = lng.toFixed(4);
+        if (map) map.flyTo([lat, lng], zoom);
+      }
+    }
+
     function initMap() {
       map = L.map('map', { zoomControl: false }).setView([-3.05, -60.05], 11);
       L.control.zoom({ position: 'topright' }).addTo(map);
@@ -1064,15 +1138,29 @@ STUDIO_HTML = """<!DOCTYPE html>
         attribution: '&copy; CartoDB & OpenStreetMap contributors',
         maxZoom: 19
       }).addTo(map);
+
+      map.on('click', function(e) {
+        document.getElementById('mapNorth').value = e.latlng.lat.toFixed(4);
+        document.getElementById('mapWest').value = e.latlng.lng.toFixed(4);
+        document.getElementById('mapHotspotSelect').value = 'custom';
+      });
     }
 
-    // Telemetry Polling
+    // Telemetry Polling (Dynamic RAM / Host Device)
     async function updateTelemetry() {
       try {
         const resp = await fetch('/studio/api/telemetry');
         const data = await resp.json();
         document.getElementById('teleDevice').innerText = data.device_name;
-        document.getElementById('teleRam').innerText = `${data.ram_used_mb}MB / ${data.ram_total_mb}MB (${data.ram_pct}%)`;
+        if (data.ram_total_mb > 1024) {
+          const usedGb = (data.ram_used_mb / 1024).toFixed(1);
+          const totalGb = (data.ram_total_mb / 1024).toFixed(1);
+          document.getElementById('teleRam').innerText = `${usedGb}GB / ${totalGb}GB (${data.ram_pct}%)`;
+        } else if (data.ram_total_mb > 0) {
+          document.getElementById('teleRam').innerText = `${data.ram_used_mb}MB / ${data.ram_total_mb}MB (${data.ram_pct}%)`;
+        } else {
+          document.getElementById('teleRam').innerText = `${data.cpu_count} Cores Active`;
+        }
         document.getElementById('teleChips').innerText = data.cached_chips_count;
         document.getElementById('teleCheckpoints').innerText = data.checkpoint_count;
       } catch (e) {
@@ -1302,12 +1390,19 @@ STUDIO_HTML = """<!DOCTYPE html>
 
     // Geospatial Inference
     async function runGeospatialInference() {
+      const isRandom = document.getElementById('mapRandomSeed') ? document.getElementById('mapRandomSeed').checked : true;
+      const westVal = parseFloat(document.getElementById('mapWest') ? document.getElementById('mapWest').value : -60.05);
+      const northVal = parseFloat(document.getElementById('mapNorth') ? document.getElementById('mapNorth').value : -3.05);
+
       const payload = {
         model_type: document.getElementById('mapModelType').value,
         deforestation_fraction: parseFloat(document.getElementById('mapDef').value),
         cloud_fraction: parseFloat(document.getElementById('mapCloud').value),
         threshold: 0.5,
-        mmu_ha: parseFloat(document.getElementById('mapMmu').value)
+        mmu_ha: parseFloat(document.getElementById('mapMmu').value),
+        west: isNaN(westVal) ? -60.05 : westVal,
+        north: isNaN(northVal) ? -3.05 : northVal,
+        seed: isRandom ? null : 42
       };
 
       try {
@@ -1379,7 +1474,51 @@ STUDIO_HTML = """<!DOCTYPE html>
       }
     }
 
+    let liveImportedDDS = null;
+
+    function importActiveAlertsToEUDR() {
+      if (!activeGeoJSON || !activeGeoJSON.features || activeGeoJSON.features.length === 0) {
+        alert('Run Geospatial Detection in the Map tab first to generate alert polygons.');
+        return;
+      }
+      document.getElementById('eudrPresetSelect').value = '';
+      const stmtId = 'DDS-LIVE-' + Date.now().toString().slice(-5);
+      document.getElementById('eudrStatementId').value = stmtId;
+      document.getElementById('eudrOperator').value = 'Audited Frontier Producer S.A.';
+
+      const ddsAlerts = activeGeoJSON.features.map((f, i) => ({
+        alert_id: f.properties.alert_id || `ALT-${i+1}`,
+        geometry: f.geometry,
+        detection_date: f.properties.detection_date || '2023-08-15T12:00:00Z',
+        area_ha: f.properties.area_ha || 2.5
+      }));
+
+      const firstGeom = activeGeoJSON.features[0].geometry;
+      const plotCoords = firstGeom.type === 'Polygon'
+        ? firstGeom.coordinates
+        : [[[-60.05, -3.05], [-60.01, -3.05], [-60.01, -3.01], [-60.05, -3.01], [-60.05, -3.05]]];
+
+      const plot = {
+        plot_id: 'PLOT-AUDITED-01',
+        geometry_type: 'Polygon',
+        coordinates: plotCoords,
+        declared_area_ha: parseFloat(document.getElementById('mapDefArea').innerText || 10.0) * 1.5
+      };
+
+      liveImportedDDS = {
+        statement_id: stmtId,
+        operator_name: 'Audited Frontier Producer S.A.',
+        commodity: document.getElementById('eudrCommodity').value || 'soya',
+        country: document.getElementById('eudrCountry').value || 'Brazil',
+        plots: [plot],
+        alerts: ddsAlerts
+      };
+
+      alert(`Imported ${ddsAlerts.length} detected deforestation polygons into Due Diligence audit! Press 'Execute Due Diligence Audit' to evaluate.`);
+    }
+
     function applyPresetScenario() {
+      liveImportedDDS = null;
       const key = document.getElementById('eudrPresetSelect').value;
       if (!key || !eudrPresetsData[key]) return;
       const sc = eudrPresetsData[key];
@@ -1389,16 +1528,16 @@ STUDIO_HTML = """<!DOCTYPE html>
       document.getElementById('eudrCountry').value = sc.country;
     }
 
-    async function executeEUDRAudit() {
+    async function executeEUDRAudit(customPayload = null) {
       const key = document.getElementById('eudrPresetSelect').value;
-      const sc = eudrPresetsData[key] || {
+      const sc = customPayload || liveImportedDDS || (key && eudrPresetsData[key] ? eudrPresetsData[key] : {
         statement_id: document.getElementById('eudrStatementId').value,
         operator_name: document.getElementById('eudrOperator').value,
         commodity: document.getElementById('eudrCommodity').value,
         country: document.getElementById('eudrCountry').value,
-        plots: [{ plot_id: 'PLOT-LIVE-01', geometry_type: 'Point', coordinates: [-60.05, -3.05], declared_area_ha: 2.5 }],
+        plots: [{ plot_id: 'PLOT-LIVE-01', geometry_type: 'Point', coordinates: [parseFloat(document.getElementById('mapWest').value || -60.05), parseFloat(document.getElementById('mapNorth').value || -3.05)], declared_area_ha: 2.5 }],
         alerts: []
-      };
+      });
 
       try {
         const resp = await fetch('/studio/api/eudr/audit', {
@@ -1434,7 +1573,18 @@ STUDIO_HTML = """<!DOCTYPE html>
 
     async function executeOlofsson() {
       try {
-        const resp = await fetch('/studio/api/olofsson', { method: 'POST' });
+        const source = document.getElementById('olofSource') ? document.getElementById('olofSource').value : 'reference';
+        const forestArea = parseFloat(document.getElementById('olofTotalArea') ? document.getElementById('olofTotalArea').value : 18750) || 18750;
+        const payload = {
+          source: source,
+          stratum_forest_ha: forestArea,
+          stratum_deforest_ha: forestArea * 0.08
+        };
+        const resp = await fetch('/studio/api/olofsson', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
         const o = await resp.json();
         document.getElementById('olofssonCard').style.display = 'block';
         document.getElementById('olofOA').innerText = o.overall_accuracy_pct + '%';
@@ -1640,6 +1790,7 @@ def create_studio_app() -> FastAPI:
             mmu_ha=req.mmu_ha,
             west=req.west,
             north=req.north,
+            seed=req.seed,
         )
         return result
 
@@ -1685,8 +1836,26 @@ def create_studio_app() -> FastAPI:
         return report
 
     @app.post("/studio/api/olofsson")
-    def olofsson_endpoint():
-        return compliance_mgr.compute_olofsson_accuracy()
+    def olofsson_endpoint(req: Optional[OlofssonRequest] = None):
+        sample_matrix = None
+        strata_areas = None
+
+        if req and req.source == "benchmark" and inference_mgr.last_benchmark_scorecard:
+            cm = inference_mgr.last_benchmark_scorecard.get("confusion_matrix", {})
+            tp = cm.get("tp", 85)
+            fp = cm.get("fp", 15)
+            fn = cm.get("fn", 8)
+            tn = cm.get("tn", 392)
+            sample_matrix = np.array([[max(1, tp), max(1, fp)], [max(1, fn), max(1, tn)]])
+            if req.stratum_deforest_ha and req.stratum_forest_ha:
+                strata_areas = np.array([float(req.stratum_deforest_ha), float(req.stratum_forest_ha)])
+
+        elif req and req.source == "custom" and req.tp is not None:
+            sample_matrix = np.array([[max(1, req.tp), max(1, req.fp or 0)], [max(1, req.fn or 0), max(1, req.tn or 1)]])
+            if req.stratum_deforest_ha and req.stratum_forest_ha:
+                strata_areas = np.array([float(req.stratum_deforest_ha), float(req.stratum_forest_ha)])
+
+        return compliance_mgr.compute_olofsson_accuracy(sample_matrix=sample_matrix, strata_areas_ha=strata_areas)
 
     # --- STAC Catalog API Endpoints ---
     @app.post("/studio/api/stac/search")

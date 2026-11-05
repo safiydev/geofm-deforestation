@@ -414,8 +414,9 @@ class StudioTrainingManager:
     ) -> Dict[str, Any]:
         self.is_training = True
         try:
+            telemetry = get_hardware_telemetry(self.checkpoint_dir, cache_dir)
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            self.log(f"💻 Hardware compute allocated: {device}")
+            self.log(f"💻 Hardware compute allocated: {telemetry['device_name']} ({telemetry['cpu_count']} CPU cores)")
 
             # 1. Dataset Loading
             dataset = None
@@ -569,6 +570,8 @@ class StudioInferenceManager:
         self.optical_prep = OpticalPreprocessor(sensor_type="sentinel2")
         self.sar_prep = SARPreprocessor(num_looks=4.4)
         self.models_cache: Dict[str, Any] = {}
+        self.last_benchmark_scorecard: Optional[Dict[str, Any]] = None
+        self.last_inference_result: Optional[Dict[str, Any]] = None
 
     def _get_model(self, model_type: str):
         if model_type not in self.models_cache:
@@ -591,15 +594,17 @@ class StudioInferenceManager:
         mmu_ha: float = 0.10,
         west: float = -60.05,
         north: float = -3.05,
+        seed: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Generate bitemporal scene, run neural inference, and extract polygon alerts."""
         t_start = time.perf_counter()
 
-        # 1. Synthesize Scene
+        # 1. Synthesize Scene with dynamic seed
+        effective_seed = seed if seed is not None else int(time.time() * 1000) % 1000000
         scene = generate_synthetic_scene(
             height=128,
             width=128,
-            seed=42,
+            seed=effective_seed,
             deforestation_fraction=deforestation_fraction,
             cloud_fraction=cloud_fraction,
         )
@@ -675,10 +680,13 @@ class StudioInferenceManager:
             lvl = f.get("properties", {}).get("alert_level", "MEDIUM")
             severity_counts[lvl] = severity_counts.get(lvl, 0) + 1
 
-        return {
+        res = {
             "model_type": model_type,
             "threshold": threshold,
             "mmu_ha": mmu_ha,
+            "west": west,
+            "north": north,
+            "seed": effective_seed,
             "inference_time_ms": round(elapsed_ms, 2),
             "total_alerts": geojson_fc["properties"]["total_alerts"],
             "total_deforested_ha": geojson_fc["properties"]["total_deforested_ha"],
@@ -700,6 +708,8 @@ class StudioInferenceManager:
                 "probability_heatmap": img_prob,
             },
         }
+        self.last_inference_result = res
+        return res
 
     def test_benchmark(
         self,
@@ -786,7 +796,7 @@ class StudioInferenceManager:
 
         elapsed_ms = (time.perf_counter() - t_start) * 1000.0
 
-        return {
+        res = {
             "checkpoint_name": checkpoint_name or "Active Siamese Backbone",
             "samples_evaluated": n_eval,
             "threshold": threshold,
@@ -804,6 +814,8 @@ class StudioInferenceManager:
             },
             "elapsed_ms": round(elapsed_ms, 2),
         }
+        self.last_benchmark_scorecard = res
+        return res
 
     def inspect_chip(
         self,
@@ -1399,14 +1411,79 @@ def get_hardware_telemetry(
     checkpoint_dir: str = "./checkpoints",
     cache_dir: str = "./data/chips_cache",
 ) -> Dict[str, Any]:
-    """Return system and accelerator telemetry (RAM, CPU, GPU, storage)."""
-    cpu_count = os.cpu_count() or 1
+    """Return live system and accelerator telemetry (RAM, CPU, GPU, OS, architecture, storage)."""
+    import platform
+    import sys
 
+    # 1. CPU & Operating System Platform Detection
+    cpu_count = os.cpu_count() or 1
+    sys_os = platform.system()  # 'Windows', 'Linux', 'Darwin', etc.
+    machine = platform.machine()  # 'AMD64', 'x86_64', 'arm64', 'aarch64'
+    proc_desc = platform.processor() or machine
+
+    # Normalize architecture string for UI clarity
+    if machine.lower() in ("amd64", "x86_64"):
+        arch_label = "x86_64"
+    elif "arm" in machine.lower() or "aarch" in machine.lower():
+        arch_label = "ARM64"
+    else:
+        arch_label = machine or "CPU"
+
+    # Human-friendly OS Label
+    if sys_os == "Windows":
+        rel = platform.release()
+        os_label = f"Windows {rel}" if rel else "Windows"
+    elif sys_os == "Darwin":
+        os_label = "macOS"
+    elif sys_os == "Linux":
+        os_label = "Linux"
+    else:
+        os_label = sys_os
+
+    # 2. Dynamic Memory (RAM) Telemetry (Windows, Linux, macOS, BSD)
     total_ram_mb = 0.0
     used_ram_mb = 0.0
     ram_pct = 0.0
+
+    # Try psutil first if installed
     try:
-        if os.path.exists("/proc/meminfo"):
+        import psutil
+        vm = psutil.virtual_memory()
+        total_ram_mb = round(vm.total / (1024 * 1024), 1)
+        used_ram_mb = round((vm.total - vm.available) / (1024 * 1024), 1)
+        ram_pct = round(((vm.total - vm.available) / vm.total) * 100, 1) if vm.total > 0 else 0.0
+    except Exception:
+        pass
+
+    # Windows Native Fallback via ctypes if psutil is absent
+    if total_ram_mb <= 0.0 and sys.platform == "win32":
+        try:
+            import ctypes
+            class MEMORYSTATUSEX(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("sullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+            stat = MEMORYSTATUSEX()
+            stat.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):
+                total_ram_mb = round(stat.ullTotalPhys / (1024 * 1024), 1)
+                avail_ram_mb = round(stat.ullAvailPhys / (1024 * 1024), 1)
+                used_ram_mb = round(total_ram_mb - avail_ram_mb, 1)
+                ram_pct = float(stat.dwMemoryLoad)
+        except Exception:
+            pass
+
+    # Linux / Termux Native Fallback via /proc/meminfo
+    if total_ram_mb <= 0.0 and os.path.exists("/proc/meminfo"):
+        try:
             mem = {}
             with open("/proc/meminfo", "r") as f:
                 for line in f:
@@ -1417,22 +1494,38 @@ def get_hardware_telemetry(
             free_ram_mb = round(mem.get("MemAvailable", mem.get("MemFree", 0)) / 1024, 1)
             used_ram_mb = round(total_ram_mb - free_ram_mb, 1)
             ram_pct = round((used_ram_mb / total_ram_mb) * 100, 1) if total_ram_mb > 0 else 0.0
-    except Exception:
-        pass
+        except Exception:
+            pass
 
-    gpu_available = torch.cuda.is_available()
-    gpu_name = "CPU Host (ARM/Linux)"
+    # 3. Dynamic Accelerator / Hardware Compute Detection
+    gpu_available = False
+    device_name = ""
     vram_used_mb = 0.0
     vram_total_mb = 0.0
     vram_pct = 0.0
-    if gpu_available:
+
+    if torch.cuda.is_available():
+        gpu_available = True
         try:
-            gpu_name = torch.cuda.get_device_name(0)
+            raw_gpu_name = torch.cuda.get_device_name(0)
             vram_total_mb = round(torch.cuda.get_device_properties(0).total_memory / (1024 * 1024), 1)
             vram_used_mb = round(torch.cuda.memory_allocated(0) / (1024 * 1024), 1)
             vram_pct = round((vram_used_mb / vram_total_mb) * 100, 1) if vram_total_mb > 0 else 0.0
+            device_name = f"CUDA: {raw_gpu_name}"
         except Exception:
-            pass
+            device_name = "CUDA GPU"
+    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        gpu_available = True
+        device_name = f"Apple Silicon MPS ({arch_label})"
+    elif hasattr(torch, "xpu") and hasattr(torch.xpu, "is_available") and torch.xpu.is_available():
+        gpu_available = True
+        try:
+            device_name = f"Intel XPU: {torch.xpu.get_device_name(0)}"
+        except Exception:
+            device_name = "Intel XPU"
+    else:
+        gpu_available = False
+        device_name = f"CPU Host ({arch_label} / {os_label})"
 
     checkpoint_count = 0
     if os.path.exists(checkpoint_dir):
@@ -1444,7 +1537,10 @@ def get_hardware_telemetry(
 
     return {
         "gpu_available": gpu_available,
-        "device_name": gpu_name,
+        "device_name": device_name,
+        "os_name": sys_os,
+        "architecture": arch_label,
+        "processor": proc_desc,
         "vram_used_mb": vram_used_mb,
         "vram_total_mb": vram_total_mb,
         "vram_pct": vram_pct,

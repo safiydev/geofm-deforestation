@@ -76,11 +76,17 @@ def main():
             print("[GeoFM Studio] Falling back seamlessly to standalone FastAPI interactive studio...")
 
     # Default / Fallback: Fast, self-contained FastAPI Web Studio
+    import torch
+    from geofm.studio.core import get_hardware_telemetry
+    telemetry = get_hardware_telemetry()
+    ram_str = f"{telemetry['ram_total_mb'] / 1024:.1f} GB" if telemetry['ram_total_mb'] > 0 else "System Allocated"
+
     print("=" * 72)
     print("  🛰️  GeoFM INTERACTIVE WEB TRAINING STUDIO & EUDR COMPLIANCE SUITE  ")
     print("=" * 72)
     print(f"  • Interface:       http://{args.host}:{args.port}")
-    print(f"  • Backend Engine:  FastAPI + Uvicorn + PyTorch 2.x")
+    print(f"  • Host Compute:    {telemetry['device_name']} ({telemetry['cpu_count']} CPU cores, {ram_str} RAM)")
+    print(f"  • Backend Engine:  FastAPI + Uvicorn + PyTorch {torch.__version__}")
     print(f"  • Visual Mapping:  Leaflet.js + Sentinel-2/1 Spectral Band Layers")
     print(f"  • Analytics:       Chart.js Live Loss & IoU History")
     print(f"  • EUDR Baseline:   December 31, 2020 Cutoff (Regulation EU 2023/1115)")
