@@ -515,3 +515,86 @@ def test_web_studio_catalog_heal_endpoint():
     assert data["mgrs_tile"] == "20MPA"
     assert "B02.tif" in data["verified_band_url"]
 
+
+# =============================================================================
+# New Studio Suite Tests: Benchmark, Inspector, Zoo, Telemetry
+# =============================================================================
+
+def test_web_studio_telemetry_endpoint():
+    resp = client.get("/studio/api/telemetry")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "cpu_count" in data
+    assert "ram_total_mb" in data
+    assert "device_name" in data
+    assert "checkpoint_count" in data
+
+
+def test_web_studio_test_benchmark_endpoint():
+    payload = {
+        "num_samples": 4,
+        "threshold": 0.5,
+    }
+    resp = client.post("/studio/api/test/benchmark", json=payload)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "iou" in data
+    assert "f1" in data
+    assert "confusion_matrix" in data
+    assert "tp" in data["confusion_matrix"]
+    assert "fp" in data["confusion_matrix"]
+    assert "fn" in data["confusion_matrix"]
+    assert "tn" in data["confusion_matrix"]
+
+
+def test_web_studio_test_chip_endpoint():
+    payload = {
+        "chip_idx": 0,
+        "threshold": 0.5,
+        "mmu_ha": 0.10,
+    }
+    resp = client.post("/studio/api/test/chip", json=payload)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "chip_id" in data
+    assert "layers" in data
+    assert "t1_rgb" in data["layers"]
+    assert "t2_rgb" in data["layers"]
+    assert "probability_heatmap" in data["layers"]
+    assert "error_diff_map" in data["layers"]
+    assert "ground_truth_mask" in data["layers"]
+    assert "chip_iou" in data
+
+
+def test_web_studio_test_thresholds_endpoint():
+    payload = {"num_samples": 4}
+    resp = client.post("/studio/api/test/thresholds", json=payload)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert isinstance(data, list)
+    assert len(data) == 9  # 0.1 to 0.9 in steps of 0.1
+    assert "threshold" in data[0]
+    assert "iou" in data[0]
+    assert "f1" in data[0]
+
+
+def test_web_studio_chips_generate_and_list(tmp_path):
+    from geofm.studio.core import StudioChipManager
+    chip_mgr = StudioChipManager(cache_dir=str(tmp_path / "chips"))
+    res = chip_mgr.generate_synthetic_chips(num_chips=10, deforest_ratio=0.70)
+    assert res["status"] == "success"
+    assert res["created_chips"] == 10
+    assert res["deforest_chips"] == 7
+    assert res["intact_chips"] == 3
+
+    chips_list = chip_mgr.list_chips()
+    assert chips_list["total_chips"] == 10
+    assert len(chips_list["chips"]) == 10
+
+
+def test_web_studio_train_stop_endpoint():
+    resp = client.post("/studio/api/train/stop")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "stopped"
+
+

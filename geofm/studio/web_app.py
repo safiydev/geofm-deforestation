@@ -10,8 +10,9 @@ import os
 from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from pydantic import BaseModel, Field
+import torch
 
 from geofm.compliance.eudr import EUDR_REGULATED_COMMODITIES
 from geofm.studio.core import (
@@ -20,6 +21,8 @@ from geofm.studio.core import (
     StudioInferenceManager,
     StudioSTACManager,
     StudioTrainingManager,
+    StudioChipManager,
+    get_hardware_telemetry,
 )
 
 
@@ -37,6 +40,36 @@ class TrainRequest(BaseModel):
     epochs: int = Field(default=3)
     batch_size: int = Field(default=4)
     num_samples: int = Field(default=16)
+    async_run: bool = Field(default=False)
+    resume: bool = Field(default=False)
+    cache_dir: str = Field(default="./data/chips_cache")
+
+
+class TestBenchmarkRequest(BaseModel):
+    checkpoint_name: Optional[str] = None
+    num_samples: int = Field(default=16)
+    threshold: float = Field(default=0.5)
+
+
+class InspectChipRequest(BaseModel):
+    chip_idx: int = Field(default=0)
+    checkpoint_name: Optional[str] = None
+    threshold: float = Field(default=0.5)
+    mmu_ha: float = Field(default=0.10)
+
+
+class ThresholdSweepRequest(BaseModel):
+    checkpoint_name: Optional[str] = None
+    num_samples: int = Field(default=8)
+
+
+class GenerateChipsRequest(BaseModel):
+    num_chips: int = Field(default=20)
+    deforest_ratio: float = Field(default=0.70)
+
+
+class LoadCheckpointRequest(BaseModel):
+    filename: str
 
 
 class InferRequest(BaseModel):
@@ -84,137 +117,471 @@ STUDIO_HTML = """<!DOCTYPE html>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>GeoFM Web Training Studio & EUDR Compliance Suite</title>
+  <!-- Powered by Leaflet Maps and Chart.js Analytics -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
   <style>
     :root {
-      --primary: #1b4332;
-      --primary-light: #2d6a4f;
-      --accent: #52b788;
-      --bg: #f8f9fa;
-      --card-bg: #ffffff;
-      --text: #212529;
-      --text-muted: #6c757d;
-      --border: #dee2e6;
-      --success: #2d6a4f;
-      --danger: #d90429;
-      --warning: #f77f00;
+      --bg: #0B111A;
+      --card-bg: #131B26;
+      --card-elevated: #1B2433;
+      --text: #F8FAFC;
+      --text-muted: #94A3B8;
+      --border: rgba(255, 255, 255, 0.08);
+      --border-focus: #06B6D4;
+      --accent-emerald: #10B981;
+      --accent-cyan: #06B6D4;
+      --accent-crimson: #EF4444;
+      --accent-amber: #F59E0B;
+      --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      --font-mono: 'Fira Code', 'JetBrains Mono', ui-monospace, monospace;
     }
-    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
-    body { background-color: var(--bg); color: var(--text); min-height: 100vh; display: flex; flex-direction: column; }
-    header { background: linear-gradient(135deg, #1b4332 0%, #081c15 100%); color: white; padding: 1.2rem 2rem; box-shadow: 0 4px 12px rgba(0,0,0,0.15); display: flex; justify-content: space-between; align-items: center; }
-    .brand { display: flex; align-items: center; gap: 0.8rem; }
-    .brand h1 { font-size: 1.5rem; font-weight: 700; letter-spacing: -0.5px; }
-    .brand p { font-size: 0.85rem; color: #b7e4c7; }
-    .header-badges { display: flex; gap: 0.5rem; }
-    .badge { font-size: 0.75rem; padding: 4px 10px; border-radius: 12px; font-weight: 600; text-transform: uppercase; }
-    .badge-primary { background: #52b788; color: #081c15; }
-    .badge-secondary { background: rgba(255,255,255,0.2); color: white; }
 
-    nav.tabs-nav { background: white; border-bottom: 1px solid var(--border); display: flex; padding: 0 2rem; gap: 1rem; overflow-x: auto; }
-    .tab-btn { background: none; border: none; padding: 1rem 1.2rem; font-size: 0.95rem; font-weight: 600; color: var(--text-muted); cursor: pointer; border-bottom: 3px solid transparent; transition: all 0.2s ease; display: flex; align-items: center; gap: 0.5rem; white-space: nowrap; }
-    .tab-btn:hover { color: var(--primary-light); }
-    .tab-btn.active { color: var(--primary); border-bottom-color: var(--primary); }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background-color: var(--bg);
+      color: var(--text);
+      font-family: var(--font-sans);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      -webkit-font-smoothing: antialiased;
+    }
 
-    main { flex: 1; padding: 2rem; max-width: 1600px; margin: 0 auto; width: 100%; }
+    /* Custom Scrollbar */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: var(--bg); }
+    ::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.16); border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.28); }
+    ::selection { background: rgba(6, 182, 212, 0.35); color: #F8FAFC; }
+
+    /* Header & Telemetry */
+    header {
+      background: #0E1622;
+      border-bottom: 1px solid var(--border);
+      padding: 0.85rem 1.75rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 1rem;
+    }
+    .brand-wrap { display: flex; align-items: center; gap: 0.75rem; }
+    .brand-badge {
+      width: 32px;
+      height: 32px;
+      border-radius: 8px;
+      background: rgba(6, 182, 212, 0.15);
+      border: 1px solid rgba(6, 182, 212, 0.3);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--accent-cyan);
+    }
+    .brand-title { font-size: 1.15rem; font-weight: 700; color: #FFFFFF; letter-spacing: -0.02em; }
+    .brand-desc { font-size: 0.75rem; color: var(--text-muted); }
+
+    .telemetry-strip { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+    .tele-pill {
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 4px 10px;
+      font-size: 0.72rem;
+      font-family: var(--font-mono);
+      font-variant-numeric: tabular-nums;
+      color: var(--text-muted);
+      display: inline-flex;
+      align-items: center;
+      gap: 0.45rem;
+    }
+    .tele-pill strong { color: var(--text); font-weight: 600; }
+    .status-pulse {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--accent-emerald);
+      box-shadow: 0 0 8px var(--accent-emerald);
+      animation: pulseAnim 2s infinite ease-in-out;
+    }
+    .status-pulse.busy {
+      background: var(--accent-amber);
+      box-shadow: 0 0 8px var(--accent-amber);
+    }
+    @keyframes pulseAnim { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.5; transform: scale(0.85); } }
+
+    /* Segmented Navigation */
+    nav.tabs-nav {
+      background: #0E1622;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      padding: 0 1.75rem;
+      gap: 0.5rem;
+      overflow-x: auto;
+    }
+    .tab-btn {
+      background: transparent;
+      border: none;
+      padding: 0.85rem 1rem;
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: var(--text-muted);
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      transition: all 0.15s ease;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      white-space: nowrap;
+    }
+    .tab-btn svg { width: 16px; height: 16px; stroke-width: 1.75; }
+    .tab-btn:hover { color: var(--text); }
+    .tab-btn.active {
+      color: var(--accent-cyan);
+      border-bottom-color: var(--accent-cyan);
+      background: rgba(6, 182, 212, 0.04);
+    }
+
+    /* Main Container */
+    main { flex: 1; padding: 1.5rem 1.75rem; max-width: 1680px; margin: 0 auto; width: 100%; }
     .tab-content { display: none; }
-    .tab-content.active { display: block; animation: fadeIn 0.25s ease; }
+    .tab-content.active { display: block; animation: fadeIn 0.2s ease-out; }
     @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
 
-    .grid-2 { display: grid; grid-template-columns: 360px 1fr; gap: 1.5rem; }
-    @media (max-width: 1024px) { .grid-2 { grid-template-columns: 1fr; } }
+    /* Layout Grids */
+    .grid-2 { display: grid; grid-template-columns: 340px 1fr; gap: 1.25rem; }
+    .grid-2-equal { display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem; }
+    @media (max-width: 1100px) {
+      .grid-2, .grid-2-equal { grid-template-columns: 1fr; }
+    }
 
-    .card { background: white; border: 1px solid var(--border); border-radius: 10px; padding: 1.5rem; box-shadow: 0 2px 6px rgba(0,0,0,0.04); margin-bottom: 1.5rem; }
-    .card-title { font-size: 1.15rem; font-weight: 700; color: var(--primary); margin-bottom: 1rem; display: flex; justify-content: space-between; align-items: center; }
+    /* Cards */
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 1.25rem;
+      margin-bottom: 1.25rem;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25);
+    }
+    .card-title {
+      font-size: 0.98rem;
+      font-weight: 600;
+      color: #FFFFFF;
+      margin-bottom: 1rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      letter-spacing: -0.01em;
+    }
 
-    .form-group { margin-bottom: 1rem; }
-    .form-group label { display: block; font-size: 0.85rem; font-weight: 600; margin-bottom: 0.35rem; color: #495057; }
-    .form-control, select, textarea { width: 100%; padding: 0.55rem 0.75rem; border: 1px solid var(--border); border-radius: 6px; font-size: 0.9rem; transition: border-color 0.15s; }
-    .form-control:focus, select:focus, textarea:focus { border-color: var(--accent); outline: none; }
-    .checkbox-group { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 1rem; }
+    /* Form Inputs */
+    .form-group { margin-bottom: 0.85rem; }
+    .form-group label {
+      display: block;
+      font-size: 0.78rem;
+      font-weight: 500;
+      color: var(--text-muted);
+      margin-bottom: 0.35rem;
+    }
+    .form-control, select, textarea {
+      width: 100%;
+      background: #0B111A;
+      color: var(--text);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 7px;
+      padding: 0.55rem 0.75rem;
+      font-size: 0.85rem;
+      font-family: var(--font-sans);
+      transition: border-color 0.15s;
+    }
+    .form-control:focus, select:focus, textarea:focus {
+      border-color: var(--border-focus);
+      outline: none;
+      box-shadow: 0 0 0 2px rgba(6, 182, 212, 0.15);
+    }
+    .checkbox-row {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin: 0.65rem 0;
+      font-size: 0.82rem;
+      color: var(--text);
+    }
+    .checkbox-row input[type="checkbox"] {
+      accent-color: var(--accent-cyan);
+      width: 15px;
+      height: 15px;
+      cursor: pointer;
+    }
 
-    .btn { display: inline-flex; align-items: center; justify-content: center; gap: 0.5rem; padding: 0.65rem 1.25rem; font-size: 0.9rem; font-weight: 600; border-radius: 6px; border: none; cursor: pointer; transition: all 0.2s; }
-    .btn-primary { background: var(--primary); color: white; width: 100%; }
-    .btn-primary:hover { background: var(--primary-light); }
-    .btn-secondary { background: #e9ecef; color: var(--text); }
-    .btn-secondary:hover { background: #dee2e6; }
+    /* Buttons */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+      padding: 0.55rem 1.1rem;
+      font-size: 0.84rem;
+      font-weight: 600;
+      border-radius: 7px;
+      border: 1px solid transparent;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      text-decoration: none;
+    }
+    .btn svg { width: 15px; height: 15px; stroke-width: 1.75; }
+    .btn-emerald { background: var(--accent-emerald); color: #0B111A; }
+    .btn-emerald:hover { background: #059669; }
+    .btn-cyan { background: var(--accent-cyan); color: #0B111A; }
+    .btn-cyan:hover { background: #0891B2; }
+    .btn-crimson { background: var(--accent-crimson); color: #FFFFFF; }
+    .btn-crimson:hover { background: #DC2626; }
+    .btn-secondary {
+      background: rgba(255, 255, 255, 0.05);
+      border-color: var(--border);
+      color: var(--text);
+    }
+    .btn-secondary:hover {
+      background: rgba(255, 255, 255, 0.10);
+      border-color: rgba(255, 255, 255, 0.2);
+    }
+    .btn-block { width: 100%; }
 
-    .metric-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
-    .metric-box { background: #f8f9fa; border-left: 4px solid var(--accent); border-radius: 6px; padding: 1rem; }
-    .metric-label { font-size: 0.8rem; color: var(--text-muted); font-weight: 600; text-transform: uppercase; }
-    .metric-val { font-size: 1.5rem; font-weight: 700; color: var(--primary); margin-top: 0.25rem; }
+    /* Scorecards & Metrics */
+    .metrics-row {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: 0.75rem;
+      margin-bottom: 1.25rem;
+    }
+    .metric-cell {
+      background: rgba(255, 255, 255, 0.02);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.75rem 1rem;
+    }
+    .metric-cell .label {
+      font-size: 0.70rem;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      font-weight: 600;
+      letter-spacing: 0.03em;
+    }
+    .metric-cell .val {
+      font-size: 1.35rem;
+      font-weight: 700;
+      color: #FFFFFF;
+      margin-top: 0.2rem;
+      font-family: var(--font-mono);
+      font-variant-numeric: tabular-nums;
+    }
+    .metric-cell.emerald .val { color: var(--accent-emerald); }
+    .metric-cell.cyan .val { color: var(--accent-cyan); }
+    .metric-cell.crimson .val { color: var(--accent-crimson); }
+    .metric-cell.amber .val { color: var(--accent-amber); }
 
-    .images-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
-    .image-card { border: 1px solid var(--border); border-radius: 6px; overflow: hidden; background: white; text-align: center; }
-    .image-card img { width: 100%; height: 180px; object-fit: cover; display: block; }
-    .image-card .caption { padding: 0.5rem; font-size: 0.8rem; font-weight: 600; color: #495057; background: #f8f9fa; }
+    /* Confusion Matrix 2x2 */
+    .cm-table {
+      width: 100%;
+      border-collapse: separate;
+      border-spacing: 6px;
+      margin-bottom: 1rem;
+      font-family: var(--font-mono);
+      font-variant-numeric: tabular-nums;
+    }
+    .cm-cell {
+      background: #0E1622;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.85rem;
+      text-align: center;
+    }
+    .cm-cell .cm-count { font-size: 1.15rem; font-weight: 700; margin-top: 0.2rem; }
+    .cm-cell.tp { border-color: rgba(16, 185, 129, 0.35); background: rgba(16, 185, 129, 0.05); }
+    .cm-cell.tp .cm-count { color: var(--accent-emerald); }
+    .cm-cell.fp { border-color: rgba(245, 158, 11, 0.35); background: rgba(245, 158, 11, 0.05); }
+    .cm-cell.fp .cm-count { color: var(--accent-amber); }
+    .cm-cell.fn { border-color: rgba(239, 68, 68, 0.35); background: rgba(239, 68, 68, 0.05); }
+    .cm-cell.fn .cm-count { color: var(--accent-crimson); }
+    .cm-cell.tn { border-color: var(--border); }
+    .cm-cell.tn .cm-count { color: var(--text-muted); }
 
-    #leafletMap { height: 420px; width: 100%; border-radius: 8px; border: 1px solid var(--border); margin-bottom: 1.5rem; z-index: 1; }
+    /* Terminal Console */
+    .terminal-box {
+      background: #070B10;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.85rem 1rem;
+      font-family: var(--font-mono);
+      font-size: 0.76rem;
+      color: #A7F3D0;
+      height: 220px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      line-height: 1.5;
+    }
+    .terminal-line { margin-bottom: 2px; }
+    .terminal-line.warn { color: var(--accent-amber); }
+    .terminal-line.err { color: var(--accent-crimson); }
+    .terminal-line.info { color: var(--accent-cyan); }
 
-    table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
-    th, td { padding: 0.65rem 0.85rem; text-align: left; border-bottom: 1px solid var(--border); }
-    th { background: #f8f9fa; font-weight: 600; color: var(--primary); }
-    tr:hover td { background: #f8f9fa; }
+    /* Spectral Layers Grid */
+    .layers-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+      gap: 1rem;
+      margin-top: 1rem;
+    }
+    .layer-card {
+      background: #0E1622;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .layer-card .layer-header {
+      padding: 0.45rem 0.65rem;
+      font-size: 0.72rem;
+      font-weight: 600;
+      color: var(--text-muted);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+    }
+    .layer-card img {
+      width: 100%;
+      height: 170px;
+      object-fit: cover;
+      display: block;
+      background: #05080C;
+    }
 
-    .badge-status { padding: 4px 10px; border-radius: 12px; font-weight: 700; font-size: 0.8rem; }
-    .badge-status.COMPLIANT { background: #d8f3dc; color: #1b4332; }
-    .badge-status.NON_COMPLIANT { background: #ffe5d9; color: #d90429; }
-    .badge-status.REJECTED { background: #fff3cd; color: #856404; }
+    /* Tables */
+    .data-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.82rem;
+    }
+    .data-table th {
+      text-align: left;
+      padding: 0.6rem 0.75rem;
+      border-bottom: 1px solid var(--border);
+      color: var(--text-muted);
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      font-weight: 600;
+    }
+    .data-table td {
+      padding: 0.65rem 0.75rem;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+      font-family: var(--font-mono);
+      font-variant-numeric: tabular-nums;
+    }
+    .data-table tr:hover td { background: rgba(255, 255, 255, 0.02); }
 
-    .progress-bar-container { width: 100%; background-color: #e9ecef; border-radius: 4px; height: 8px; margin: 0.5rem 0 1rem; overflow: hidden; display: none; }
-    .progress-bar { height: 100%; background-color: var(--accent); width: 0%; transition: width 0.3s; }
+    /* Map Viewport */
+    #map {
+      height: 480px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: #0B111A;
+    }
+
+    /* Status Badges */
+    .badge-pill {
+      font-size: 0.70rem;
+      font-weight: 700;
+      padding: 3px 8px;
+      border-radius: 4px;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+      display: inline-block;
+    }
+    .badge-compliant { background: rgba(16, 185, 129, 0.2); color: var(--accent-emerald); border: 1px solid rgba(16, 185, 129, 0.4); }
+    .badge-violation { background: rgba(239, 68, 68, 0.2); color: var(--accent-crimson); border: 1px solid rgba(239, 68, 68, 0.4); }
   </style>
 </head>
 <body>
 
+  <!-- Top App Header -->
   <header>
-    <div class="brand">
-      <span style="font-size: 2rem;">🛰️</span>
+    <div class="brand-wrap">
+      <div class="brand-badge">
+        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
+      </div>
       <div>
-        <h1>GeoFM Web Training Studio & EUDR Suite</h1>
-        <p>Interactive Foundation Model Fine-Tuning & Satellite Compliance Engine</p>
+        <div class="brand-title">GeoFM Web Training Studio</div>
+        <div class="brand-desc">Autonomous Deforestation Detection & EUDR Due Diligence Platform</div>
       </div>
     </div>
-    <div class="header-badges">
-      <span class="badge badge-primary">FastAPI Engine</span>
-      <span class="badge badge-secondary">PyTorch 2.x</span>
-      <span class="badge badge-secondary">EUDR 2023/1115</span>
+    <div class="telemetry-strip" id="telemetryStrip">
+      <div class="tele-pill"><span class="status-pulse" id="trainingStatusDot"></span> <span id="teleTrainStatus">IDLE</span></div>
+      <div class="tele-pill">DEVICE: <strong id="teleDevice">Detecting...</strong></div>
+      <div class="tele-pill">RAM: <strong id="teleRam">-- / --</strong></div>
+      <div class="tele-pill">CHIPS: <strong id="teleChips">--</strong></div>
+      <div class="tele-pill">CHECKPOINTS: <strong id="teleCheckpoints">--</strong></div>
     </div>
   </header>
 
+  <!-- Segmented Navigation (Author SVG Icons) -->
   <nav class="tabs-nav">
-    <button class="tab-btn active" onclick="switchTab('tab1', this)">🏋️ 1. AI Training Studio</button>
-    <button class="tab-btn" onclick="switchTab('tab2', this)">🛰️ 2. Satellite Inference & Map</button>
-    <button class="tab-btn" onclick="switchTab('tab3', this)">⚖️ 3. EUDR Due Diligence Audit</button>
-    <button class="tab-btn" onclick="switchTab('tab4', this)">🗂️ 4. STAC Catalog Explorer</button>
+    <button class="tab-btn active" onclick="switchTab('training')">
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><line x1="4" y1="21" x2="4" y2="14"></line><line x1="4" y1="10" x2="4" y2="3"></line><line x1="12" y1="21" x2="12" y2="12"></line><line x1="12" y1="8" x2="12" y2="3"></line><line x1="20" y1="21" x2="20" y2="16"></line><line x1="20" y1="12" x2="20" y2="3"></line><line x1="1" y1="14" x2="7" y2="14"></line><line x1="9" y1="8" x2="15" y2="8"></line><line x1="17" y1="16" x2="23" y2="16"></line></svg>
+      Training Studio
+    </button>
+    <button class="tab-btn" onclick="switchTab('benchmark')">
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
+      Model Benchmark
+    </button>
+    <button class="tab-btn" onclick="switchTab('inspector')">
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"></circle><line x1="22" y1="12" x2="18" y2="12"></line><line x1="6" y1="12" x2="2" y2="12"></line><line x1="12" y1="6" x2="12" y2="2"></line><line x1="12" y1="22" x2="12" y2="18"></line></svg>
+      Deep Chip Inspector
+    </button>
+    <button class="tab-btn" onclick="switchTab('map')">
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><polygon points="1 6 1 22 8 18 16 22 23 18 23 2 16 6 8 2 1 6"></polygon><line x1="8" y1="2" x2="8" y2="18"></line><line x1="16" y1="6" x2="16" y2="22"></line></svg>
+      Geospatial Map
+    </button>
+    <button class="tab-btn" onclick="switchTab('eudr')">
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
+      EUDR Due Diligence
+    </button>
+    <button class="tab-btn" onclick="switchTab('zoo')">
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="9" ry="3"></ellipse><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path></svg>
+      Checkpoints & Zoo
+    </button>
   </nav>
 
+  <!-- Main Content Areas -->
   <main>
-    <!-- TAB 1: AI MODEL TRAINING STUDIO -->
-    <div id="tab1" class="tab-content active">
+
+    <!-- TAB 1: AI TRAINING STUDIO -->
+    <div id="tab-training" class="tab-content active">
       <div class="grid-2">
         <div>
           <div class="card">
-            <h3 class="card-title">Training Configuration</h3>
+            <div class="card-title">Training Configuration</div>
             <div class="form-group">
               <label>Model Architecture</label>
               <select id="trainArch">
-                <option value="siamese">Siamese Bitemporal Change Detector</option>
-                <option value="unet">U-Net ViT Hybrid (ResNet + Transformer)</option>
-                <option value="multimodal">Multimodal Cross-Attention (Optical + SAR)</option>
+                <option value="siamese" selected>Siamese Change Detector (Bitemporal S-2)</option>
+                <option value="multimodal">Multimodal Early-Fusion (Sentinel-1 SAR + S-2)</option>
+                <option value="unet">UNet Baseline (ResNet-18 Backbone)</option>
               </select>
             </div>
-            <div class="checkbox-group">
+            <div class="checkbox-row">
               <input type="checkbox" id="trainUseLora" checked>
-              <label for="trainUseLora" style="margin:0; font-weight:600;">Inject LoRA PEFT Adapters</label>
+              <label for="trainUseLora">Enable LoRA Parameter-Efficient Fine-Tuning</label>
             </div>
-            <div style="display:flex; gap:0.5rem;">
-              <div class="form-group" style="flex:1;">
+            <div class="grid-2-equal">
+              <div class="form-group">
                 <label>LoRA Rank (r)</label>
                 <input type="number" id="trainLoraRank" class="form-control" value="8" min="2" max="64">
               </div>
-              <div class="form-group" style="flex:1;">
+              <div class="form-group">
                 <label>LoRA Alpha (α)</label>
                 <input type="number" id="trainLoraAlpha" class="form-control" value="16.0" min="4" max="128">
               </div>
@@ -222,453 +589,511 @@ STUDIO_HTML = """<!DOCTYPE html>
             <div class="form-group">
               <label>Loss Function</label>
               <select id="trainLoss">
-                <option value="compound">Compound Loss (Focal + Tversky)</option>
-                <option value="focal_tversky">Focal Tversky Loss (Asymmetric)</option>
-                <option value="focal">Binary Focal Loss (Hard Negatives)</option>
-                <option value="tversky">Tversky Loss</option>
+                <option value="compound" selected>Compound Deforestation Loss (Focal + Tversky)</option>
+                <option value="focal_tversky">Focal Tversky Loss</option>
+                <option value="focal">Binary Focal Loss (γ = 2.0)</option>
+                <option value="bce">Standard Binary Cross Entropy</option>
               </select>
             </div>
-            <div style="display:flex; gap:0.5rem;">
-              <div class="form-group" style="flex:1;">
+            <div class="grid-2-equal">
+              <div class="form-group">
+                <label>Learning Rate</label>
+                <input type="number" id="trainLR" class="form-control" value="0.001" step="0.0001">
+              </div>
+              <div class="form-group">
                 <label>Epochs</label>
-                <input type="number" id="trainEpochs" class="form-control" value="3" min="1" max="20">
+                <input type="number" id="trainEpochs" class="form-control" value="5" min="1" max="100">
               </div>
-              <div class="form-group" style="flex:1;">
+            </div>
+            <div class="grid-2-equal">
+              <div class="form-group">
                 <label>Batch Size</label>
-                <select id="trainBatch">
-                  <option value="2">2</option>
-                  <option value="4" selected>4</option>
-                  <option value="8">8</option>
-                </select>
+                <input type="number" id="trainBatch" class="form-control" value="4" min="1" max="32">
+              </div>
+              <div class="form-group">
+                <label>Dataset Size</label>
+                <input type="number" id="trainSamples" class="form-control" value="20" min="4" max="500">
               </div>
             </div>
-            <div class="form-group">
-              <label>Learning Rate</label>
-              <select id="trainLr">
-                <option value="0.0001">1e-4</option>
-                <option value="0.0005">5e-4</option>
-                <option value="0.001" selected>1e-3</option>
-                <option value="0.005">5e-3</option>
-              </select>
+            <div class="checkbox-row">
+              <input type="checkbox" id="trainResume" checked>
+              <label for="trainResume">Resume from latest checkpoint if present</label>
             </div>
-            <button class="btn btn-primary" id="btnStartTrain" onclick="startTraining()">🚀 Start Training Run</button>
-            <div class="progress-bar-container" id="trainProgBar">
-              <div class="progress-bar" id="trainProgFill"></div>
+            <div style="display: flex; gap: 0.5rem; margin-top: 1rem;">
+              <button class="btn btn-emerald" style="flex:1;" onclick="startTraining()">
+                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+                Start Training
+              </button>
+              <button class="btn btn-crimson" onclick="stopTraining()">
+                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"></rect></svg>
+                Stop
+              </button>
             </div>
           </div>
         </div>
 
         <div>
+          <div class="metrics-row">
+            <div class="metric-cell cyan">
+              <div class="label">Current Epoch</div>
+              <div class="val" id="dispEpoch">0 / 0</div>
+            </div>
+            <div class="metric-cell crimson">
+              <div class="label">Train Loss</div>
+              <div class="val" id="dispTrainLoss">--</div>
+            </div>
+            <div class="metric-cell amber">
+              <div class="label">Val Loss</div>
+              <div class="val" id="dispValLoss">--</div>
+            </div>
+            <div class="metric-cell emerald">
+              <div class="label">Val IoU</div>
+              <div class="val" id="dispValIoU">--</div>
+            </div>
+            <div class="metric-cell">
+              <div class="label">Learning Rate</div>
+              <div class="val" id="dispLR">--</div>
+            </div>
+          </div>
+
           <div class="card">
-            <h3 class="card-title">Live Loss & Validation IoU Curves</h3>
-            <div style="height: 280px; position: relative;">
+            <div class="card-title">Live Loss & Metrics Convergence</div>
+            <div style="height: 250px;">
               <canvas id="trainingChart"></canvas>
             </div>
           </div>
 
           <div class="card">
-            <h3 class="card-title">Epoch History & Confusion Matrix</h3>
-            <div style="overflow-x: auto;">
-              <table id="epochTable">
-                <thead>
-                  <tr>
-                    <th>Epoch</th><th>Train Loss</th><th>Val Loss</th><th>Val IoU</th><th>Val F1</th><th>Precision</th><th>Recall</th><th>TP / FP / FN</th>
-                  </tr>
-                </thead>
-                <tbody id="epochTableBody">
-                  <tr><td colspan="8" style="text-align:center; color:#6c757d;">No training runs executed yet.</td></tr>
-                </tbody>
-              </table>
-            </div>
-          </div>
-
-          <div class="card">
-            <h3 class="card-title">Saved Model Checkpoints</h3>
-            <div style="overflow-x: auto;">
-              <table id="checkpointTable">
-                <thead>
-                  <tr>
-                    <th>Checkpoint File</th><th>Epoch</th><th>Best IoU</th><th>Size</th><th>Last Modified</th>
-                  </tr>
-                </thead>
-                <tbody id="checkpointBody">
-                  <tr><td colspan="5" style="text-align:center;">Loading checkpoints...</td></tr>
-                </tbody>
-              </table>
-            </div>
+            <div class="card-title">Training Log Stream</div>
+            <div class="terminal-box" id="trainTerminal">Studio standby. Ready to train foundation model.</div>
           </div>
         </div>
       </div>
     </div>
 
-    <!-- TAB 2: SATELLITE INFERENCE & MAP -->
-    <div id="tab2" class="tab-content">
+    <!-- TAB 2: MODEL TESTING & BENCHMARKING -->
+    <div id="tab-benchmark" class="tab-content">
       <div class="grid-2">
         <div>
           <div class="card">
-            <h3 class="card-title">Inference Pipeline Settings</h3>
+            <div class="card-title">Benchmark Parameters</div>
             <div class="form-group">
-              <label>Deforestation Extent (Fraction)</label>
-              <input type="range" id="inferDefFrac" class="form-control" min="0.02" max="0.25" step="0.02" value="0.08" oninput="document.getElementById('lblDefFrac').innerText = this.value">
-              <span id="lblDefFrac" style="font-size:0.8rem; color:var(--text-muted);">0.08</span>
-            </div>
-            <div class="form-group">
-              <label>Cloud Occlusion (Fraction)</label>
-              <input type="range" id="inferCloudFrac" class="form-control" min="0.0" max="0.3" step="0.05" value="0.15" oninput="document.getElementById('lblCloudFrac').innerText = this.value">
-              <span id="lblCloudFrac" style="font-size:0.8rem; color:var(--text-muted);">0.15</span>
-            </div>
-            <div class="form-group">
-              <label>Model Architecture</label>
-              <select id="inferModel">
-                <option value="siamese" selected>Siamese Bitemporal Network</option>
-                <option value="multimodal">Multimodal Cross-Attention (Opt+SAR)</option>
-                <option value="unet">U-Net ViT Disturbance</option>
-                <option value="ndvi_delta">Baseline: Bitemporal ΔNDVI</option>
+              <label>Select Model Checkpoint</label>
+              <select id="benchCheckpoint">
+                <option value="">Active Siamese Backbone (In-Memory)</option>
               </select>
             </div>
             <div class="form-group">
-              <label>Probability Threshold</label>
-              <input type="number" id="inferThreshold" class="form-control" value="0.5" min="0.1" max="0.9" step="0.05">
+              <label>Validation Samples Count</label>
+              <input type="number" id="benchSamples" class="form-control" value="16" min="4" max="100">
             </div>
             <div class="form-group">
-              <label>Minimum Mapping Unit (MMU in ha)</label>
-              <input type="number" id="inferMmu" class="form-control" value="0.10" min="0.05" max="1.0" step="0.05">
+              <label>Classification Threshold: <strong id="benchThreshVal" style="color:var(--accent-cyan);">0.50</strong></label>
+              <input type="range" id="benchThreshold" min="0.10" max="0.90" step="0.05" value="0.50" oninput="document.getElementById('benchThreshVal').innerText = parseFloat(this.value).toFixed(2)">
             </div>
-            <button class="btn btn-primary" onclick="runInference()">🛰️ Run Satellite Inference</button>
+            <button class="btn btn-cyan btn-block" onclick="runBenchmark()">
+              <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path></svg>
+              Execute Benchmark
+            </button>
+            <div style="margin-top: 0.75rem;">
+              <button class="btn btn-secondary btn-block" onclick="runThresholdSweep()">
+                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>
+                Compute Threshold Sweep (0.1 - 0.9)
+              </button>
+            </div>
           </div>
         </div>
 
         <div>
-          <div class="metric-grid">
-            <div class="metric-box">
-              <div class="metric-label">Alert Clusters</div>
-              <div class="metric-val" id="metricAlerts">0</div>
-            </div>
-            <div class="metric-box">
-              <div class="metric-label">Deforested Area</div>
-              <div class="metric-val" id="metricDefHa">0.00 ha</div>
-            </div>
-            <div class="metric-box">
-              <div class="metric-label">Inference Latency</div>
-              <div class="metric-val" id="metricLatency">0.0 ms</div>
-            </div>
-            <div class="metric-box">
-              <div class="metric-label">Cloud Occlusion</div>
-              <div class="metric-val" id="metricCloud">0.0%</div>
+          <div class="card">
+            <div class="card-title">Pixel-Level Confusion Matrix Scorecard</div>
+            <table class="cm-table">
+              <tr>
+                <td></td>
+                <td style="text-align:center; font-size:0.75rem; color:var(--text-muted); font-weight:600;">ACTUAL DEFOREST</td>
+                <td style="text-align:center; font-size:0.75rem; color:var(--text-muted); font-weight:600;">ACTUAL INTACT</td>
+              </tr>
+              <tr>
+                <td style="font-size:0.75rem; color:var(--text-muted); font-weight:600; vertical-align:middle;">PRED DEFOREST</td>
+                <td class="cm-cell tp">
+                  <div style="font-size:0.70rem; color:var(--text-muted);">TRUE POSITIVE</div>
+                  <div class="cm-count" id="cmTP">--</div>
+                </td>
+                <td class="cm-cell fp">
+                  <div style="font-size:0.70rem; color:var(--text-muted);">FALSE POSITIVE</div>
+                  <div class="cm-count" id="cmFP">--</div>
+                </td>
+              </tr>
+              <tr>
+                <td style="font-size:0.75rem; color:var(--text-muted); font-weight:600; vertical-align:middle;">PRED INTACT</td>
+                <td class="cm-cell fn">
+                  <div style="font-size:0.70rem; color:var(--text-muted);">FALSE NEGATIVE</div>
+                  <div class="cm-count" id="cmFN">--</div>
+                </td>
+                <td class="cm-cell tn">
+                  <div style="font-size:0.70rem; color:var(--text-muted);">TRUE NEGATIVE</div>
+                  <div class="cm-count" id="cmTN">--</div>
+                </td>
+              </tr>
+            </table>
+
+            <div class="metrics-row" style="margin-top: 1rem;">
+              <div class="metric-cell emerald">
+                <div class="label">IoU Score</div>
+                <div class="val" id="bmIoU">--</div>
+              </div>
+              <div class="metric-cell cyan">
+                <div class="label">F1 / Dice</div>
+                <div class="val" id="bmF1">--</div>
+              </div>
+              <div class="metric-cell">
+                <div class="label">Precision</div>
+                <div class="val" id="bmPrecision">--</div>
+              </div>
+              <div class="metric-cell">
+                <div class="label">Recall</div>
+                <div class="val" id="bmRecall">--</div>
+              </div>
+              <div class="metric-cell">
+                <div class="label">Specificity</div>
+                <div class="val" id="bmSpecificity">--</div>
+              </div>
+              <div class="metric-cell">
+                <div class="label">Accuracy</div>
+                <div class="val" id="bmAccuracy">--</div>
+              </div>
             </div>
           </div>
 
-          <div class="card">
-            <h3 class="card-title">Interactive Geospatial Alert Map</h3>
-            <div id="leafletMap"></div>
-          </div>
-
-          <div class="card">
-            <h3 class="card-title">Multi-Spectral Bands & Feature Layers</h3>
-            <div class="images-grid" id="layerGrid">
-              <div class="image-card"><div style="height:180px; background:#eee; display:flex; align-items:center; justify-content:center;">Click Run Inference</div><div class="caption">Baseline T1 RGB</div></div>
-              <div class="image-card"><div style="height:180px; background:#eee; display:flex; align-items:center; justify-content:center;">Click Run Inference</div><div class="caption">Disturbed T2 RGB</div></div>
-              <div class="image-card"><div style="height:180px; background:#eee; display:flex; align-items:center; justify-content:center;">Click Run Inference</div><div class="caption">Sentinel-1 SAR False Color</div></div>
-              <div class="image-card"><div style="height:180px; background:#eee; display:flex; align-items:center; justify-content:center;">Click Run Inference</div><div class="caption">Deforestation Probability</div></div>
-            </div>
-          </div>
-
-          <div class="card">
-            <h3 class="card-title">Detected Deforestation Polygons</h3>
-            <div style="overflow-x: auto;">
-              <table id="alertsTable">
-                <thead>
-                  <tr><th>Cluster ID</th><th>Area (ha)</th><th>Alert Severity</th><th>Centroid Coordinates</th></tr>
-                </thead>
-                <tbody id="alertsBody">
-                  <tr><td colspan="4" style="text-align:center;">Run inference to view alert polygons.</td></tr>
-                </tbody>
-              </table>
+          <div class="card" id="sweepCard" style="display: none;">
+            <div class="card-title">Threshold Sensitivity & Trade-Off Sweep Curve</div>
+            <div style="height: 240px;">
+              <canvas id="sweepChart"></canvas>
             </div>
           </div>
         </div>
       </div>
     </div>
 
-    <!-- TAB 3: EUDR DUE DILIGENCE AUDIT -->
-    <div id="tab3" class="tab-content">
+    <!-- TAB 3: SINGLE-CHIP DEEP INSPECTOR -->
+    <div id="tab-inspector" class="tab-content">
+      <div class="card">
+        <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:1rem;">
+          <div style="display:flex; align-items:center; gap:0.75rem;">
+            <div class="card-title" style="margin-bottom:0;">Chip Inspector: <span id="inspChipTitle" style="color:var(--accent-cyan); font-family:var(--font-mono);">chip_0000</span></div>
+            <div class="tele-pill">GT: <strong id="inspGtPct" style="color:var(--accent-crimson);">--%</strong></div>
+            <div class="tele-pill">PRED: <strong id="inspPredPct" style="color:var(--accent-amber);">--%</strong></div>
+            <div class="tele-pill">IoU: <strong id="inspIoU" style="color:var(--accent-emerald);">--</strong></div>
+          </div>
+          <div style="display:flex; align-items:center; gap:0.5rem;">
+            <input type="number" id="inspChipIdx" class="form-control" style="width: 80px;" value="0" min="0">
+            <button class="btn btn-secondary" onclick="stepChip(-1)">Prev</button>
+            <button class="btn btn-secondary" onclick="stepChip(1)">Next</button>
+            <button class="btn btn-cyan" onclick="inspectCurrentChip()">Deep Inspect</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="layers-grid" id="layersContainer">
+        <!-- 9 Multi-spectral and prediction layers populated dynamically -->
+      </div>
+    </div>
+
+    <!-- TAB 4: GEOSPATIAL ALERT MAP -->
+    <div id="tab-map" class="tab-content">
       <div class="grid-2">
         <div>
           <div class="card">
-            <h3 class="card-title">Due Diligence Statement (DDS)</h3>
+            <div class="card-title">Geospatial Simulation</div>
             <div class="form-group">
-              <label>Preset Test Scenarios</label>
-              <select id="eudrPreset" onchange="loadPresetScenario()">
-                <option value="">-- Choose a Preset --</option>
+              <label>Model Engine</label>
+              <select id="mapModelType">
+                <option value="siamese" selected>Bitemporal Siamese Net</option>
+                <option value="multimodal">Sentinel-1/2 Multimodal Net</option>
+                <option value="unet">UNet Baseline</option>
+                <option value="baseline_ndvi">ΔNDVI Heuristic</option>
               </select>
             </div>
             <div class="form-group">
-              <label>Statement ID</label>
-              <input type="text" id="eudrStmtId" class="form-control" value="DDS-2024-BRAZIL-SOYA-001">
+              <label>Deforestation Fraction: <strong id="mapDefVal" style="color:var(--accent-crimson);">0.08</strong></label>
+              <input type="range" id="mapDef" min="0.01" max="0.30" step="0.01" value="0.08" oninput="document.getElementById('mapDefVal').innerText = parseFloat(this.value).toFixed(2)">
             </div>
             <div class="form-group">
-              <label>Operator Name</label>
-              <input type="text" id="eudrOperator" class="form-control" value="Agroflorestal Rio Negro S.A.">
+              <label>Cloud Contamination: <strong id="mapCloudVal" style="color:var(--text-muted);">0.15</strong></label>
+              <input type="range" id="mapCloud" min="0.0" max="0.50" step="0.05" value="0.15" oninput="document.getElementById('mapCloudVal').innerText = parseFloat(this.value).toFixed(2)">
             </div>
             <div class="form-group">
-              <label>Commodity (EUDR Annex I)</label>
-              <select id="eudrCommodity">
-                <option value="cattle">Cattle</option>
-                <option value="cocoa">Cocoa</option>
-                <option value="coffee">Coffee</option>
-                <option value="oil palm">Oil Palm</option>
-                <option value="rubber">Rubber</option>
-                <option value="soya" selected>Soya</option>
-                <option value="wood">Wood</option>
-                <option value="wheat">Wheat (Non-Regulated Test)</option>
-              </select>
+              <label>Minimum Mapping Unit (MMU): <strong id="mapMmuVal" style="color:var(--accent-cyan);">0.10 ha</strong></label>
+              <input type="range" id="mapMmu" min="0.02" max="1.0" step="0.02" value="0.10" oninput="document.getElementById('mapMmuVal').innerText = parseFloat(this.value).toFixed(2) + ' ha'">
             </div>
-            <div class="form-group">
-              <label>Country of Production</label>
-              <input type="text" id="eudrCountry" class="form-control" value="Brazil">
+            <button class="btn btn-emerald btn-block" onclick="runGeospatialInference()">
+              <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><polygon points="1 6 1 22 8 18 16 22 23 18 23 2 16 6 8 2 1 6"></polygon></svg>
+              Run Geospatial Inference
+            </button>
+            <div style="margin-top:0.65rem;">
+              <button class="btn btn-secondary btn-block" onclick="exportGeoJSON()">
+                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+                Export Alerts GeoJSON
+              </button>
             </div>
-            <button class="btn btn-primary" onclick="runEudrAudit()">⚖️ Audit EUDR Compliance</button>
+          </div>
+
+          <div class="metrics-row">
+            <div class="metric-cell crimson">
+              <div class="label">Total Alerts</div>
+              <div class="val" id="mapAlertsCount">--</div>
+            </div>
+            <div class="metric-cell amber">
+              <div class="label">Deforested Area</div>
+              <div class="val" id="mapDefArea">-- ha</div>
+            </div>
           </div>
         </div>
 
         <div>
-          <div class="card" id="auditVerdictCard" style="display:none;">
-            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;">
-              <div>
-                <span style="font-size:0.9rem; color:var(--text-muted); font-weight:600;">AUDIT VERDICT:</span>
-                <span id="verdictBadge" class="badge-status COMPLIANT" style="font-size:1.1rem; margin-left:0.5rem;">COMPLIANT</span>
-              </div>
-              <div>
-                <span style="font-size:0.9rem; color:var(--text-muted); font-weight:600;">RISK SCORE:</span>
-                <span id="verdictRisk" style="font-size:1.2rem; font-weight:700; margin-left:0.3rem;">0.00</span>
-              </div>
-            </div>
-            <div id="plotsAuditContainer"></div>
-          </div>
-
-          <div class="card">
-            <h3 class="card-title">Plot Geolocation Specifications (JSON)</h3>
-            <div class="form-group">
-              <textarea id="eudrPlotsJson" rows="6"></textarea>
-            </div>
-            <h3 class="card-title" style="margin-top:1.5rem;">Deforestation Alerts for Intersection (JSON)</h3>
-            <div class="form-group">
-              <textarea id="eudrAlertsJson" rows="4"></textarea>
-              <button class="btn btn-secondary" type="button" onclick="importLatestAlertsToEudr()" style="margin-top:0.5rem; font-size:0.8rem; padding:0.4rem 0.8rem; width:auto;">⚡ Import AI Alerts from Tab 2 Inference</button>
-            </div>
-          </div>
-
-          <div class="card">
-            <h3 class="card-title">📐 Olofsson et al. (2014) Area-Adjusted Accuracy Assessment</h3>
-            <p style="font-size:0.85rem; color:var(--text-muted); margin-bottom:1rem;">
-              Calculates unbiased change area estimates and 95% confidence intervals from stratified error matrices.
-            </p>
-            <div class="metric-grid">
-              <div class="metric-box">
-                <div class="metric-label">Area-Adjusted Overall Accuracy</div>
-                <div class="metric-val" id="olofOA">97.2% ± 0.8%</div>
-              </div>
-              <div class="metric-box">
-                <div class="metric-label">Unbiased Deforestation Area</div>
-                <div class="metric-val" id="olofArea">1,215 ha ± 94 ha</div>
-              </div>
-            </div>
-            <button class="btn btn-secondary" onclick="calculateOlofsson()">Recompute Olofsson Accuracy</button>
+          <div class="card" style="padding:0.75rem;">
+            <div id="map"></div>
           </div>
         </div>
       </div>
     </div>
 
-    <!-- TAB 4: STAC CATALOG EXPLORER -->
-    <div id="tab4" class="tab-content">
+    <!-- TAB 5: EUDR DUE DILIGENCE AUDIT -->
+    <div id="tab-eudr" class="tab-content">
       <div class="grid-2">
         <div>
           <div class="card">
-            <h3 class="card-title">Catalog Search Filters</h3>
+            <div class="card-title">Due Diligence Audit (EUDR)</div>
             <div class="form-group">
-              <label>Region Preset</label>
-              <select id="stacPreset" onchange="applyStacPreset()">
-                <option value="amazon" selected>Amazon Basin (Manaus)</option>
-                <option value="congo">Congo Basin (Salonga)</option>
-                <option value="borneo">Borneo Tropical Peatland</option>
+              <label>Regulatory Preset Scenarios</label>
+              <select id="eudrPresetSelect" onchange="applyPresetScenario()">
+                <option value="">-- Choose Standard Farm Case --</option>
               </select>
             </div>
             <div class="form-group">
-              <label>Bounding Box [W, S, E, N]</label>
-              <input type="text" id="stacBbox" class="form-control" value="[-60.5, -3.5, -59.5, -2.5]">
+              <label>DDS Statement ID</label>
+              <input type="text" id="eudrStatementId" class="form-control" value="DDS-2024-TEST-001">
             </div>
             <div class="form-group">
-              <label>Satellite Platform</label>
-              <select id="stacPlatform">
-                <option value="">All Platforms</option>
-                <option value="sentinel-2">Sentinel-2 (Optical L2A)</option>
-                <option value="sentinel-1">Sentinel-1 (SAR GRD)</option>
-              </select>
+              <label>Operator Legal Entity</label>
+              <input type="text" id="eudrOperator" class="form-control" value="AgriCommodities International">
             </div>
-            <div class="form-group">
-              <label>Max Cloud Cover (%)</label>
-              <input type="number" id="stacCloud" class="form-control" value="30" min="0" max="100">
+            <div class="grid-2-equal">
+              <div class="form-group">
+                <label>Annex I Commodity</label>
+                <select id="eudrCommodity">
+                  <option value="soya" selected>Soya</option>
+                  <option value="oil palm">Oil Palm</option>
+                  <option value="cattle">Cattle (Beef/Leather)</option>
+                  <option value="cocoa">Cocoa</option>
+                  <option value="coffee">Coffee</option>
+                  <option value="rubber">Rubber</option>
+                  <option value="wood">Wood / Timber</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label>Country of Production</label>
+                <input type="text" id="eudrCountry" class="form-control" value="Brazil">
+              </div>
             </div>
-            <button class="btn btn-primary" onclick="searchSTAC()">🔍 Search STAC Items</button>
-          </div>
-
-          <div class="card">
-            <h3 class="card-title">Catalog URL Validator & Auto-Healer</h3>
-            <p style="font-size:0.8rem; color:var(--text-muted); margin-bottom:0.75rem;">
-              Test remote COG asset existence (HTTP HEAD) or auto-heal broken/malformed Sentinel-2 S3 paths to nearest valid satellite overpasses.
-            </p>
-            <div class="form-group">
-              <label>Target COG URL</label>
-              <input type="text" id="catalogUrlInput" class="form-control" placeholder="https://.../B02.tif" value="https://sentinel-cogs.s3.amazonaws.com/sentinel-s2-l2a-cogs/20/M/PA/2023/11/S2A_20231124/B02.tif">
+            <button class="btn btn-emerald btn-block" onclick="executeEUDRAudit()">
+              <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
+              Execute Due Diligence Audit
+            </button>
+            <div style="margin-top:0.65rem;">
+              <button class="btn btn-secondary btn-block" onclick="executeOlofsson()">
+                Compute Olofsson Stratified Accuracy (95% CI)
+              </button>
             </div>
-            <div style="display:flex; gap:0.5rem;">
-              <button class="btn btn-secondary" style="flex:1;" onclick="validateCatalogUrl()">🩺 Test URL</button>
-              <button class="btn btn-primary" style="flex:1;" onclick="healCatalogUrl()">✨ Auto-Heal Path</button>
-            </div>
-            <div id="catalogCheckResult" style="margin-top:0.75rem; font-size:0.85rem; display:none;"></div>
           </div>
         </div>
 
         <div>
           <div class="card">
-            <h3 class="card-title">Matched Cloud-Optimized GeoTIFF (COG) Items</h3>
-            <div id="stacResultsContainer">
-              <p style="color:var(--text-muted); font-size:0.9rem;">Click "Search STAC Items" to query the catalog.</p>
+            <div class="card-title">
+              Audit Assessment Result
+              <span id="eudrStatusBadge" class="badge-pill badge-compliant">STANDBY</span>
             </div>
+            <div class="metrics-row">
+              <div class="metric-cell" id="eudrRiskCell">
+                <div class="label">Compliance Risk Score</div>
+                <div class="val" id="eudrRiskScore">0.00</div>
+              </div>
+              <div class="metric-cell">
+                <div class="label">Plots Assessed</div>
+                <div class="val" id="eudrPlotsCount">0</div>
+              </div>
+              <div class="metric-cell">
+                <div class="label">Cutoff Date</div>
+                <div class="val" style="font-size:0.95rem; margin-top:0.4rem;">2020-12-31</div>
+              </div>
+            </div>
+            <div id="eudrViolationBox" style="font-size:0.85rem; line-height:1.6; color:var(--text-muted);">
+              Select a scenario or audit statement to evaluate compliance against EU Regulation 2023/1115.
+            </div>
+          </div>
+
+          <div class="card" id="olofssonCard" style="display:none;">
+            <div class="card-title">Olofsson et al. (2014) Area-Adjusted Verification</div>
+            <div class="metrics-row">
+              <div class="metric-cell emerald">
+                <div class="label">Overall Accuracy</div>
+                <div class="val" id="olofOA">--%</div>
+              </div>
+              <div class="metric-cell">
+                <div class="label">Margin of Error (95% CI)</div>
+                <div class="val" id="olofME">±--%</div>
+              </div>
+              <div class="metric-cell cyan">
+                <div class="label">Deforestation Area</div>
+                <div class="val" id="olofArea">-- ha</div>
+              </div>
+            </div>
+            <div id="olofSummary" style="font-family:var(--font-mono); font-size:0.75rem; color:var(--text-muted); white-space:pre-wrap;"></div>
           </div>
         </div>
       </div>
     </div>
+
+    <!-- TAB 6: CHECKPOINTS & DATASET ZOO -->
+    <div id="tab-zoo" class="tab-content">
+      <div class="grid-2-equal">
+        <div class="card">
+          <div class="card-title">
+            Model Checkpoints
+            <button class="btn btn-secondary" style="padding:3px 8px; font-size:0.72rem;" onclick="loadCheckpoints()">Refresh</button>
+          </div>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Checkpoint File</th>
+                <th>Size (MB)</th>
+                <th>Epoch</th>
+                <th>Val IoU</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="checkpointsTableBody">
+              <tr><td colspan="5" style="color:var(--text-muted); text-align:center;">Scanning checkpoints directory...</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="card">
+          <div class="card-title">
+            Cached Chips Zoo
+            <button class="btn btn-cyan" style="padding:3px 8px; font-size:0.72rem;" onclick="generateSyntheticChips()">Generate 70:30 Chips</button>
+          </div>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Chip ID</th>
+                <th>Size</th>
+                <th>Loss %</th>
+                <th>Class Quota</th>
+              </tr>
+            </thead>
+            <tbody id="chipsTableBody">
+              <tr><td colspan="4" style="color:var(--text-muted); text-align:center;">No cached chips in ./data/chips_cache</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
   </main>
 
+  <!-- Studio Javascript Engine -->
   <script>
-    // Tab switching
-    function switchTab(tabId, el) {
+    let trainingChart = null;
+    let sweepChart = null;
+    let map = null;
+    let mapAlertsLayer = null;
+    let activeGeoJSON = null;
+    let eudrPresetsData = {};
+    let isTrainingActive = false;
+    let trainingPollInterval = null;
+
+    // Tab Navigation
+    function switchTab(tabId) {
       document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
       document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-      el.classList.add('active');
-      document.getElementById(tabId).classList.add('active');
-      if (tabId === 'tab2' && map) {
-        setTimeout(() => {
-          map.invalidateSize();
-          if (alertGeoJsonLayer && alertGeoJsonLayer.getBounds && alertGeoJsonLayer.getBounds().isValid()) {
-            map.fitBounds(alertGeoJsonLayer.getBounds(), { padding: [20, 20] });
-          }
-        }, 200);
+      const activeBtn = Array.from(document.querySelectorAll('.tab-btn')).find(b => b.getAttribute('onclick').includes(tabId));
+      if (activeBtn) activeBtn.classList.add('active');
+      const target = document.getElementById('tab-' + tabId);
+      if (target) target.classList.add('active');
+      if (tabId === 'map' && map) {
+        setTimeout(() => map.invalidateSize(), 150);
       }
     }
 
-    // Chart.js Training Graph
-    let trainChart = null;
-    function initChart() {
-      const ctx = document.getElementById('trainingChart').getContext('2d');
-      trainChart = new Chart(ctx, {
+    // Chart Initializations
+    function initCharts() {
+      const tCtx = document.getElementById('trainingChart').getContext('2d');
+      trainingChart = new Chart(tCtx, {
         type: 'line',
         data: {
-          labels: [1, 2, 3],
+          labels: [],
           datasets: [
-            { label: 'Train Loss', data: [0.65, 0.42, 0.28], borderColor: '#d90429', tension: 0.2 },
-            { label: 'Val Loss', data: [0.61, 0.39, 0.25], borderColor: '#f77f00', tension: 0.2 },
-            { label: 'Val IoU (%)', data: [45.2, 72.8, 86.4], borderColor: '#2d6a4f', tension: 0.2, yAxisID: 'y1' }
+            { label: 'Train Loss', data: [], borderColor: '#EF4444', backgroundColor: 'transparent', tension: 0.3, yAxisID: 'y' },
+            { label: 'Val Loss', data: [], borderColor: '#F59E0B', backgroundColor: 'transparent', tension: 0.3, yAxisID: 'y' },
+            { label: 'Val IoU', data: [], borderColor: '#10B981', backgroundColor: 'transparent', tension: 0.3, yAxisID: 'y1' }
           ]
         },
         options: {
           responsive: true,
           maintainAspectRatio: false,
           scales: {
-            y: { title: { display: true, text: 'Loss' } },
-            y1: { position: 'right', title: { display: true, text: 'IoU (%)' }, grid: { drawOnChartArea: false } }
+            x: { grid: { color: 'rgba(255, 255, 255, 0.05)' }, ticks: { color: '#94A3B8', font: { family: 'Fira Code' } } },
+            y: { position: 'left', grid: { color: 'rgba(255, 255, 255, 0.05)' }, ticks: { color: '#94A3B8', font: { family: 'Fira Code' } } },
+            y1: { position: 'right', min: 0, max: 1, grid: { drawOnChartArea: false }, ticks: { color: '#10B981', font: { family: 'Fira Code' } } }
+          },
+          plugins: {
+            legend: { labels: { color: '#F8FAFC', font: { family: 'Inter', size: 11 } } }
           }
         }
       });
     }
 
-    // Leaflet Interactive Map
-    let map = null;
-    let alertGeoJsonLayer = null;
+    // Map Initialization
     function initMap() {
-      map = L.map('leafletMap').setView([-3.05, -60.05], 11);
-      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-        maxZoom: 18,
-        attribution: '© OpenStreetMap contributors | GeoFM Sentinel Alert Layer'
+      map = L.map('map', { zoomControl: false }).setView([-3.05, -60.05], 11);
+      L.control.zoom({ position: 'topright' }).addTo(map);
+      // Dark Basemap (CartoDB Dark Matter with OSM Fallback)
+      L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+        attribution: '&copy; CartoDB & OpenStreetMap contributors',
+        maxZoom: 19
       }).addTo(map);
     }
 
-    // Preset Scenarios Cache
-    let presetScenarios = {};
-
-    async function loadPresets() {
+    // Telemetry Polling
+    async function updateTelemetry() {
       try {
-        const resp = await fetch('/studio/api/eudr/presets');
-        presetScenarios = await resp.json();
-        const sel = document.getElementById('eudrPreset');
-        sel.innerHTML = '<option value="">-- Choose a Preset Scenario --</option>';
-        for (const [name, sc] of Object.entries(presetScenarios)) {
-          const opt = document.createElement('option');
-          opt.value = name;
-          opt.innerText = name;
-          sel.appendChild(opt);
-        }
-        if (Object.keys(presetScenarios).length > 0) {
-          sel.selectedIndex = 1;
-          loadPresetScenario();
-        }
-      } catch (err) {
-        console.error('Failed to load presets:', err);
+        const resp = await fetch('/studio/api/telemetry');
+        const data = await resp.json();
+        document.getElementById('teleDevice').innerText = data.device_name;
+        document.getElementById('teleRam').innerText = `${data.ram_used_mb}MB / ${data.ram_total_mb}MB (${data.ram_pct}%)`;
+        document.getElementById('teleChips').innerText = data.cached_chips_count;
+        document.getElementById('teleCheckpoints').innerText = data.checkpoint_count;
+      } catch (e) {
+        console.warn('Telemetry update error:', e);
       }
     }
 
-    function loadPresetScenario() {
-      const name = document.getElementById('eudrPreset').value;
-      if (!name || !presetScenarios[name]) return;
-      const sc = presetScenarios[name];
-      document.getElementById('eudrStmtId').value = sc.statement_id;
-      document.getElementById('eudrOperator').value = sc.operator_name;
-      document.getElementById('eudrCommodity').value = sc.commodity;
-      document.getElementById('eudrCountry').value = sc.country;
-      document.getElementById('eudrPlotsJson').value = JSON.stringify(sc.plots, null, 2);
-      document.getElementById('eudrAlertsJson').value = JSON.stringify(sc.alerts, null, 2);
-    }
-
-    async function loadCheckpoints() {
-      try {
-        const resp = await fetch('/studio/api/checkpoints');
-        const chks = await resp.json();
-        const tbody = document.getElementById('checkpointBody');
-        tbody.innerHTML = '';
-        if (chks.length === 0) {
-          tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;">No checkpoint files found.</td></tr>';
-          return;
-        }
-        for (const c of chks) {
-          const tr = document.createElement('tr');
-          const iouStr = typeof c.best_val_iou === 'number' ? (c.best_val_iou * 100).toFixed(2) + '%' : c.best_val_iou;
-          tr.innerHTML = `<td><b>${c.filename}</b></td><td>${c.epoch}</td><td>${iouStr}</td><td>${c.size_mb} MB</td><td>${c.modified}</td>`;
-          tbody.appendChild(tr);
-        }
-      } catch (err) {
-        console.error('Failed to load checkpoints:', err);
-      }
-    }
-
-    // Training Execution
+    // Training Actions
     async function startTraining() {
-      const btn = document.getElementById('btnStartTrain');
-      btn.disabled = true;
-      btn.innerText = '⏳ Training in Progress...';
-      const prog = document.getElementById('trainProgBar');
-      prog.style.display = 'block';
-
       const payload = {
         architecture: document.getElementById('trainArch').value,
         use_lora: document.getElementById('trainUseLora').checked,
         lora_rank: parseInt(document.getElementById('trainLoraRank').value),
         lora_alpha: parseFloat(document.getElementById('trainLoraAlpha').value),
         loss_type: document.getElementById('trainLoss').value,
-        learning_rate: parseFloat(document.getElementById('trainLr').value),
+        learning_rate: parseFloat(document.getElementById('trainLR').value),
         epochs: parseInt(document.getElementById('trainEpochs').value),
         batch_size: parseInt(document.getElementById('trainBatch').value),
-        num_samples: 16
+        num_samples: parseInt(document.getElementById('trainSamples').value),
+        async_run: true,
+        resume: document.getElementById('trainResume').checked
       };
 
       try {
@@ -677,49 +1102,212 @@ STUDIO_HTML = """<!DOCTYPE html>
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload)
         });
-        const data = await resp.json();
-
-        // Update Chart
-        const hist = data.history || [];
-        const labels = hist.map(h => 'Epoch ' + h.epoch);
-        const trainLosses = hist.map(h => h.train_loss);
-        const valLosses = hist.map(h => h.val_loss);
-        const valIous = hist.map(h => (h.val_iou * 100).toFixed(2));
-
-        trainChart.data.labels = labels;
-        trainChart.data.datasets[0].data = trainLosses;
-        trainChart.data.datasets[1].data = valLosses;
-        trainChart.data.datasets[2].data = valIous;
-        trainChart.update();
-
-        // Update Table
-        const tbody = document.getElementById('epochTableBody');
-        tbody.innerHTML = '';
-        for (const h of hist) {
-          const cm = h.confusion_matrix || {};
-          const tr = document.createElement('tr');
-          tr.innerHTML = `<td>${h.epoch}</td><td>${h.train_loss}</td><td>${h.val_loss}</td><td>${(h.val_iou*100).toFixed(2)}%</td><td>${(h.val_f1*100).toFixed(2)}%</td><td>${(h.val_precision*100).toFixed(2)}%</td><td>${(h.val_recall*100).toFixed(2)}%</td><td>${cm.tp || 0} / ${cm.fp || 0} / ${cm.fn || 0}</td>`;
-          tbody.appendChild(tr);
-        }
-
-        loadCheckpoints();
+        const res = await resp.json();
+        isTrainingActive = true;
+        document.getElementById('trainingStatusDot').className = 'status-pulse busy';
+        document.getElementById('teleTrainStatus').innerText = 'TRAINING';
+        appendTerminal(`[INFO] Training initiated with ${payload.architecture} architecture.`);
+        if (trainingPollInterval) clearInterval(trainingPollInterval);
+        trainingPollInterval = setInterval(pollTrainingStatus, 1000);
       } catch (err) {
-        alert('Training failed: ' + err);
-      } finally {
-        btn.disabled = false;
-        btn.innerText = '🚀 Start Training Run';
-        prog.style.display = 'none';
+        appendTerminal(`[ERROR] Failed to start training: ${err}`);
       }
     }
 
-    // Satellite Inference Execution
-    async function runInference() {
+    async function stopTraining() {
+      try {
+        const resp = await fetch('/studio/api/train/stop', { method: 'POST' });
+        appendTerminal('[WARN] Stop signal delivered to background training loop.');
+      } catch (err) {
+        appendTerminal(`[ERROR] Failed to stop: ${err}`);
+      }
+    }
+
+    async function pollTrainingStatus() {
+      try {
+        const resp = await fetch('/studio/api/train/status');
+        const data = await resp.json();
+        if (data.is_training) {
+          document.getElementById('dispEpoch').innerText = `${data.current_epoch} / ${data.total_epochs}`;
+          if (data.current_train_loss !== null) document.getElementById('dispTrainLoss').innerText = data.current_train_loss.toFixed(4);
+          if (data.current_val_loss !== null) document.getElementById('dispValLoss').innerText = data.current_val_loss.toFixed(4);
+          if (data.current_val_iou !== null) document.getElementById('dispValIoU').innerText = data.current_val_iou.toFixed(4);
+          if (data.current_lr !== null) document.getElementById('dispLR').innerText = data.current_lr.toExponential(2);
+        } else if (isTrainingActive) {
+          isTrainingActive = false;
+          clearInterval(trainingPollInterval);
+          document.getElementById('trainingStatusDot').className = 'status-pulse';
+          document.getElementById('teleTrainStatus').innerText = 'IDLE';
+          appendTerminal('[INFO] Training loop completed successfully.');
+          loadCheckpoints();
+        }
+
+        // Render logs
+        if (data.logs && data.logs.length > 0) {
+          const t = document.getElementById('trainTerminal');
+          t.innerHTML = data.logs.map(l => `<div class="terminal-line">${escapeHtml(l)}</div>`).join('');
+          t.scrollTop = t.scrollHeight;
+        }
+
+        // Update Chart
+        if (data.history && data.history.length > 0) {
+          trainingChart.data.labels = data.history.map(h => `Ep ${h.epoch}`);
+          trainingChart.data.datasets[0].data = data.history.map(h => h.train_loss);
+          trainingChart.data.datasets[1].data = data.history.map(h => h.val_loss);
+          trainingChart.data.datasets[2].data = data.history.map(h => h.val_iou);
+          trainingChart.update();
+        }
+      } catch (err) {
+        console.warn('Poll error:', err);
+      }
+    }
+
+    function appendTerminal(msg) {
+      const t = document.getElementById('trainTerminal');
+      const time = new Date().toISOString().substring(11, 19);
+      t.innerHTML += `<div class="terminal-line">[${time}] ${escapeHtml(msg)}</div>`;
+      t.scrollTop = t.scrollHeight;
+    }
+
+    // Benchmark Actions
+    async function runBenchmark() {
       const payload = {
-        deforestation_fraction: parseFloat(document.getElementById('inferDefFrac').value),
-        cloud_fraction: parseFloat(document.getElementById('inferCloudFrac').value),
-        model_type: document.getElementById('inferModel').value,
-        threshold: parseFloat(document.getElementById('inferThreshold').value),
-        mmu_ha: parseFloat(document.getElementById('inferMmu').value)
+        checkpoint_name: document.getElementById('benchCheckpoint').value || null,
+        num_samples: parseInt(document.getElementById('benchSamples').value),
+        threshold: parseFloat(document.getElementById('benchThreshold').value)
+      };
+
+      try {
+        const resp = await fetch('/studio/api/test/benchmark', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const d = await resp.json();
+        document.getElementById('cmTP').innerText = d.confusion_matrix.tp.toLocaleString();
+        document.getElementById('cmFP').innerText = d.confusion_matrix.fp.toLocaleString();
+        document.getElementById('cmFN').innerText = d.confusion_matrix.fn.toLocaleString();
+        document.getElementById('cmTN').innerText = d.confusion_matrix.tn.toLocaleString();
+
+        document.getElementById('bmIoU').innerText = (d.iou * 100).toFixed(1) + '%';
+        document.getElementById('bmF1').innerText = (d.f1 * 100).toFixed(1) + '%';
+        document.getElementById('bmPrecision').innerText = (d.precision * 100).toFixed(1) + '%';
+        document.getElementById('bmRecall').innerText = (d.recall * 100).toFixed(1) + '%';
+        document.getElementById('bmSpecificity').innerText = (d.specificity * 100).toFixed(1) + '%';
+        document.getElementById('bmAccuracy').innerText = (d.accuracy * 100).toFixed(1) + '%';
+      } catch (err) {
+        alert('Benchmark failed: ' + err);
+      }
+    }
+
+    async function runThresholdSweep() {
+      const payload = {
+        checkpoint_name: document.getElementById('benchCheckpoint').value || null,
+        num_samples: 8
+      };
+
+      try {
+        const resp = await fetch('/studio/api/test/thresholds', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const sweepData = await resp.json();
+        document.getElementById('sweepCard').style.display = 'block';
+
+        if (!sweepChart) {
+          const sCtx = document.getElementById('sweepChart').getContext('2d');
+          sweepChart = new Chart(sCtx, {
+            type: 'line',
+            data: {
+              labels: sweepData.map(s => s.threshold.toFixed(2)),
+              datasets: [
+                { label: 'IoU', data: sweepData.map(s => s.iou), borderColor: '#10B981', tension: 0.3 },
+                { label: 'F1 Score', data: sweepData.map(s => s.f1), borderColor: '#06B6D4', tension: 0.3 },
+                { label: 'Precision', data: sweepData.map(s => s.precision), borderColor: '#A78BFA', tension: 0.3 },
+                { label: 'Recall', data: sweepData.map(s => s.recall), borderColor: '#F59E0B', tension: 0.3 }
+              ]
+            },
+            options: {
+              responsive: true,
+              maintainAspectRatio: false,
+              scales: {
+                x: { title: { display: true, text: 'Threshold (τ)', color: '#94A3B8' }, ticks: { color: '#94A3B8' }, grid: { color: 'rgba(255,255,255,0.05)' } },
+                y: { min: 0, max: 1, ticks: { color: '#94A3B8' }, grid: { color: 'rgba(255,255,255,0.05)' } }
+              },
+              plugins: { legend: { labels: { color: '#F8FAFC' } } }
+            }
+          });
+        } else {
+          sweepChart.data.labels = sweepData.map(s => s.threshold.toFixed(2));
+          sweepChart.data.datasets[0].data = sweepData.map(s => s.iou);
+          sweepChart.data.datasets[1].data = sweepData.map(s => s.f1);
+          sweepChart.data.datasets[2].data = sweepData.map(s => s.precision);
+          sweepChart.data.datasets[3].data = sweepData.map(s => s.recall);
+          sweepChart.update();
+        }
+      } catch (err) {
+        alert('Sweep failed: ' + err);
+      }
+    }
+
+    // Chip Deep Inspector
+    async function inspectCurrentChip() {
+      const idx = parseInt(document.getElementById('inspChipIdx').value) || 0;
+      try {
+        const resp = await fetch('/studio/api/test/chip', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ chip_idx: idx, threshold: 0.5, mmu_ha: 0.10 })
+        });
+        const d = await resp.json();
+        document.getElementById('inspChipTitle').innerText = d.chip_id;
+        document.getElementById('inspGtPct').innerText = d.ground_truth_pct + '%';
+        document.getElementById('inspPredPct').innerText = d.predicted_pct + '%';
+        document.getElementById('inspIoU').innerText = (d.chip_iou * 100).toFixed(1) + '%';
+
+        const layers = [
+          { title: 'T1 S-2 True Color (RGB)', src: d.layers.t1_rgb },
+          { title: 'T2 S-2 Post-Clearance (RGB)', src: d.layers.t2_rgb },
+          { title: 'T1 Color Infrared (CIR)', src: d.layers.t1_cir },
+          { title: 'T2 Color Infrared (CIR)', src: d.layers.t2_cir },
+          { title: 'T1 NDVI Canopy Heatmap', src: d.layers.ndvi_t1 },
+          { title: 'T2 NDVI Canopy Heatmap', src: d.layers.ndvi_t2 },
+          { title: 'Sentinel-1 SAR Radar Composite', src: d.layers.sar_composite },
+          { title: 'Ground Truth Hansen Mask', src: d.layers.ground_truth_mask },
+          { title: 'AI Deforestation Probability', src: d.layers.probability_heatmap },
+          { title: 'Pixel Error Confusion Map', src: d.layers.error_diff_map }
+        ];
+
+        const container = document.getElementById('layersContainer');
+        container.innerHTML = layers.map(l => `
+          <div class="layer-card">
+            <div class="layer-header">
+              <span>${l.title}</span>
+            </div>
+            <img src="${l.src}" alt="${l.title}">
+          </div>
+        `).join('');
+      } catch (err) {
+        console.error('Inspect error:', err);
+      }
+    }
+
+    function stepChip(delta) {
+      const el = document.getElementById('inspChipIdx');
+      let val = Math.max(0, (parseInt(el.value) || 0) + delta);
+      el.value = val;
+      inspectCurrentChip();
+    }
+
+    // Geospatial Inference
+    async function runGeospatialInference() {
+      const payload = {
+        model_type: document.getElementById('mapModelType').value,
+        deforestation_fraction: parseFloat(document.getElementById('mapDef').value),
+        cloud_fraction: parseFloat(document.getElementById('mapCloud').value),
+        threshold: 0.5,
+        mmu_ha: parseFloat(document.getElementById('mapMmu').value)
       };
 
       try {
@@ -729,259 +1317,238 @@ STUDIO_HTML = """<!DOCTYPE html>
           body: JSON.stringify(payload)
         });
         const data = await resp.json();
+        document.getElementById('mapAlertsCount').innerText = data.total_alerts;
+        document.getElementById('mapDefArea').innerText = data.total_deforested_ha.toFixed(2) + ' ha';
 
-        // Metrics
-        document.getElementById('metricAlerts').innerText = data.total_alerts;
-        document.getElementById('metricDefHa').innerText = data.total_deforested_ha.toFixed(2) + ' ha';
-        document.getElementById('metricLatency').innerText = data.inference_time_ms + ' ms';
-        document.getElementById('metricCloud').innerText = data.cloud_percentage.toFixed(1) + '%';
+        activeGeoJSON = data.geojson;
+        if (mapAlertsLayer) map.removeLayer(mapAlertsLayer);
 
-        // Layers
-        const layers = data.layers;
-        window.latestInferenceGeoJson = data.geojson;
-        const grid = document.getElementById('layerGrid');
-        grid.innerHTML = `
-          <div class="image-card"><img src="${layers.t1_rgb}"><div class="caption">Baseline T1 (True Color RGB)</div></div>
-          <div class="image-card"><img src="${layers.t1_cir}"><div class="caption">Baseline T1 CIR (Color Infrared)</div></div>
-          <div class="image-card"><img src="${layers.ndvi_t1}"><div class="caption">Baseline T1 NDVI (Vegetation)</div></div>
-          <div class="image-card"><img src="${layers.t2_rgb}"><div class="caption">Disturbed T2 (True Color RGB)</div></div>
-          <div class="image-card"><img src="${layers.t2_cir}"><div class="caption">T2 Color Infrared (CIR B8-B4-B3)</div></div>
-          <div class="image-card"><img src="${layers.ndvi_t2}"><div class="caption">Disturbed T2 NDVI (Disturbance)</div></div>
-          <div class="image-card"><img src="${layers.sar_composite}"><div class="caption">Sentinel-1 SAR False Color</div></div>
-          <div class="image-card"><img src="${layers.probability_heatmap}"><div class="caption">Deforestation Probability Map</div></div>
-        `;
-
-        // Render GeoJSON Alerts on Leaflet Map
-        if (alertGeoJsonLayer) {
-          map.removeLayer(alertGeoJsonLayer);
-        }
-
-        const geojson = data.geojson;
-        alertGeoJsonLayer = L.geoJSON(geojson, {
+        mapAlertsLayer = L.geoJSON(data.geojson, {
           style: function(feat) {
-            const lvl = feat.properties.alert_level;
-            const color = lvl === 'CRITICAL' ? '#d90429' : lvl === 'HIGH' ? '#f77f00' : '#fcbf49';
-            return { color: color, weight: 2, fillColor: color, fillOpacity: 0.5 };
+            const lvl = feat.properties.alert_level || 'MEDIUM';
+            const col = lvl === 'CRITICAL' ? '#EF4444' : (lvl === 'HIGH' ? '#F59E0B' : '#06B6D4');
+            return { color: col, weight: 2, fillOpacity: 0.45, fillColor: col };
           },
           onEachFeature: function(feat, layer) {
             const p = feat.properties;
-            layer.bindPopup(`<b>Alert ${p.cluster_id}</b><br>Severity: <b>${p.alert_level}</b><br>Area: ${p.area_ha} ha`);
+            layer.bindPopup(`
+              <div style="font-family:var(--font-sans); color:#0B111A; font-size:12px;">
+                <strong style="color:#EF4444;">${p.alert_level || 'ALERT'}</strong><br>
+                Area: <b>${p.area_ha.toFixed(2)} ha</b><br>
+                Confidence: <b>${(p.confidence * 100).toFixed(0)}%</b><br>
+                Date: ${p.detection_date || 'N/A'}
+              </div>
+            `);
           }
         }).addTo(map);
 
-        if (geojson.features && geojson.features.length > 0 && alertGeoJsonLayer.getBounds && alertGeoJsonLayer.getBounds().isValid() && map.getSize().x > 0) {
-          map.fitBounds(alertGeoJsonLayer.getBounds(), { padding: [20, 20] });
-        }
-
-        // Table
-        const tbody = document.getElementById('alertsBody');
-        tbody.innerHTML = '';
-        for (const f of geojson.features || []) {
-          const p = f.properties;
-          const tr = document.createElement('tr');
-          tr.innerHTML = `<td><b>${p.cluster_id}</b></td><td>${p.area_ha} ha</td><td><span class="badge" style="background:#d90429; color:white;">${p.alert_level}</span></td><td>${p.centroid ? p.centroid.join(', ') : 'N/A'}</td>`;
-          tbody.appendChild(tr);
+        if (data.geojson.features && data.geojson.features.length > 0) {
+          map.fitBounds(mapAlertsLayer.getBounds(), { padding: [30, 30] });
         }
       } catch (err) {
-        alert('Inference failed: ' + err);
+        alert('Geospatial inference failed: ' + err);
       }
     }
 
-    function importLatestAlertsToEudr() {
-      if (window.latestInferenceGeoJson) {
-        document.getElementById('eudrAlertsJson').value = JSON.stringify(window.latestInferenceGeoJson, null, 2);
-      } else {
-        alert('No inference alerts available yet. Run satellite inference in Tab 2 first.');
-      }
-    }
-
-    // EUDR Due Diligence Audit
-    async function runEudrAudit() {
-      let plots, alerts;
-      try {
-        plots = JSON.parse(document.getElementById('eudrPlotsJson').value);
-        alerts = JSON.parse(document.getElementById('eudrAlertsJson').value);
-      } catch (err) {
-        alert('Invalid JSON in plot or alert fields: ' + err);
+    function exportGeoJSON() {
+      if (!activeGeoJSON) {
+        alert('Run geospatial inference first to generate alert polygons.');
         return;
       }
+      const dataStr = 'data:text/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(activeGeoJSON, null, 2));
+      const a = document.createElement('a');
+      a.setAttribute('href', dataStr);
+      a.setAttribute('download', 'geofm_deforestation_alerts.geojson');
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    }
 
-      const payload = {
-        statement_id: document.getElementById('eudrStmtId').value,
+    // EUDR Audit
+    async function loadPresets() {
+      try {
+        const resp = await fetch('/studio/api/eudr/presets');
+        eudrPresetsData = await resp.json();
+        const sel = document.getElementById('eudrPresetSelect');
+        sel.innerHTML = '<option value="">-- Choose Standard Farm Case --</option>';
+        Object.keys(eudrPresetsData).forEach(k => {
+          sel.innerHTML += `<option value="${escapeHtml(k)}">${escapeHtml(k)}</option>`;
+        });
+      } catch (e) {
+        console.warn('Failed loading presets:', e);
+      }
+    }
+
+    function applyPresetScenario() {
+      const key = document.getElementById('eudrPresetSelect').value;
+      if (!key || !eudrPresetsData[key]) return;
+      const sc = eudrPresetsData[key];
+      document.getElementById('eudrStatementId').value = sc.statement_id;
+      document.getElementById('eudrOperator').value = sc.operator_name;
+      document.getElementById('eudrCommodity').value = sc.commodity;
+      document.getElementById('eudrCountry').value = sc.country;
+    }
+
+    async function executeEUDRAudit() {
+      const key = document.getElementById('eudrPresetSelect').value;
+      const sc = eudrPresetsData[key] || {
+        statement_id: document.getElementById('eudrStatementId').value,
         operator_name: document.getElementById('eudrOperator').value,
         commodity: document.getElementById('eudrCommodity').value,
         country: document.getElementById('eudrCountry').value,
-        plots: plots,
-        alerts: alerts
+        plots: [{ plot_id: 'PLOT-LIVE-01', geometry_type: 'Point', coordinates: [-60.05, -3.05], declared_area_ha: 2.5 }],
+        alerts: []
       };
 
       try {
         const resp = await fetch('/studio/api/eudr/audit', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
+          body: JSON.stringify(sc)
         });
-        const data = await resp.json();
-
-        const card = document.getElementById('auditVerdictCard');
-        card.style.display = 'block';
-
-        const badge = document.getElementById('verdictBadge');
-        badge.innerText = data.overall_status;
-        badge.className = 'badge-status ' + data.overall_status;
-
-        document.getElementById('verdictRisk').innerText = data.risk_score.toFixed(2);
-
-        const container = document.getElementById('plotsAuditContainer');
-        container.innerHTML = '';
-        for (const p of data.plots || []) {
-          const div = document.createElement('div');
-          div.style.cssText = 'border:1px solid #dee2e6; border-radius:6px; padding:0.75rem; margin-top:0.75rem; background:#f8f9fa;';
-          let violationsHtml = '<span style="color:#2d6a4f; font-weight:600;">✓ No Violations Detected</span>';
-          if (p.violations && p.violations.length > 0) {
-            violationsHtml = '<ul style="color:#d90429; margin-left:1.2rem; margin-top:0.25rem;">' + p.violations.map(v => `<li>${v}</li>`).join('') + '</ul>';
-          }
-          div.innerHTML = `
-            <div style="display:flex; justify-content:space-between; font-weight:700;">
-              <span>Plot: ${p.plot_id} (${p.area_ha} ha)</span>
-              <span class="badge-status ${p.status}">${p.status}</span>
-            </div>
-            <div style="margin-top:0.5rem; font-size:0.85rem;">${violationsHtml}</div>
-          `;
-          container.appendChild(div);
+        const rep = await resp.json();
+        const badge = document.getElementById('eudrStatusBadge');
+        if (rep.overall_status === 'COMPLIANT') {
+          badge.className = 'badge-pill badge-compliant';
+          badge.innerText = 'COMPLIANT (APPROVED)';
+        } else {
+          badge.className = 'badge-pill badge-violation';
+          badge.innerText = 'NON-COMPLIANT (FLAGGED)';
         }
+        document.getElementById('eudrRiskScore').innerText = rep.risk_score.toFixed(2);
+        document.getElementById('eudrPlotsCount').innerText = rep.plots.length;
+
+        let html = '';
+        rep.plots.forEach(p => {
+          if (p.violations && p.violations.length > 0) {
+            html += `<div style="color:var(--accent-crimson); margin-bottom:6px;"><b>Violation [${p.plot_id}]:</b> ${p.violations.join(', ')}</div>`;
+          } else {
+            html += `<div style="color:var(--accent-emerald); margin-bottom:6px;"><b>Compliant [${p.plot_id}]:</b> Passed statutory EUDR criteria (≤4ha point rule, post-2020 zero-deforestation).</div>`;
+          }
+        });
+        document.getElementById('eudrViolationBox').innerHTML = html;
       } catch (err) {
-        alert('Audit failed: ' + err);
+        alert('Audit execution error: ' + err);
       }
     }
 
-    // Olofsson Assessment
-    async function calculateOlofsson() {
+    async function executeOlofsson() {
       try {
         const resp = await fetch('/studio/api/olofsson', { method: 'POST' });
-        const data = await resp.json();
-        document.getElementById('olofOA').innerText = `${data.overall_accuracy_pct}% ± ${data.oa_margin_of_error_pct}%`;
-        const defArea = data.estimated_areas_ha['Deforestation'] || 0;
-        const defMoe = data.area_margins_of_error_ha['Deforestation'] || 0;
-        document.getElementById('olofArea').innerText = `${defArea.toLocaleString()} ha ± ${defMoe.toLocaleString()} ha`;
+        const o = await resp.json();
+        document.getElementById('olofssonCard').style.display = 'block';
+        document.getElementById('olofOA').innerText = o.overall_accuracy_pct + '%';
+        document.getElementById('olofME').innerText = '±' + o.oa_margin_of_error_pct + '%';
+        document.getElementById('olofArea').innerText = o.estimated_areas_ha['Deforestation'] + ' ha';
+        document.getElementById('olofSummary').innerText = o.summary_text;
       } catch (err) {
-        console.error('Olofsson failed:', err);
+        alert('Olofsson assessment failed: ' + err);
       }
     }
 
-    // STAC Search
-    function applyStacPreset() {
-      const p = document.getElementById('stacPreset').value;
-      if (p === 'amazon') document.getElementById('stacBbox').value = '[-60.5, -3.5, -59.5, -2.5]';
-      if (p === 'congo') document.getElementById('stacBbox').value = '[20.0, -2.5, 21.0, -1.5]';
-      if (p === 'borneo') document.getElementById('stacBbox').value = '[112.5, -2.5, 113.5, -1.5]';
-    }
-
-    async function searchSTAC() {
-      let bbox;
+    // Checkpoints & Zoo
+    async function loadCheckpoints() {
       try {
-        bbox = JSON.parse(document.getElementById('stacBbox').value);
-      } catch (e) {
-        alert('Invalid bounding box format. Use [min_lon, min_lat, max_lon, max_lat]');
-        return;
-      }
+        const resp = await fetch('/studio/api/checkpoints');
+        const chks = await resp.json();
+        const tbody = document.getElementById('checkpointsTableBody');
+        const benchSel = document.getElementById('benchCheckpoint');
 
-      const payload = {
-        bbox: bbox,
-        platform: document.getElementById('stacPlatform').value || null,
-        max_cloud_cover: parseFloat(document.getElementById('stacCloud').value)
-      };
-
-      try {
-        const resp = await fetch('/studio/api/stac/search', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
-        });
-        const items = await resp.json();
-        const container = document.getElementById('stacResultsContainer');
-        container.innerHTML = '';
-        if (items.length === 0) {
-          container.innerHTML = '<p style="color:var(--text-muted);">No matching STAC items found.</p>';
+        benchSel.innerHTML = '<option value="">Active Siamese Backbone (In-Memory)</option>';
+        if (chks.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="5" style="color:var(--text-muted); text-align:center;">No .pt checkpoints found.</td></tr>';
           return;
         }
-        for (const it of items) {
-          const div = document.createElement('div');
-          div.style.cssText = 'border:1px solid #dee2e6; border-radius:6px; padding:1rem; margin-bottom:1rem; background:white;';
-          let assetsHtml = Object.entries(it.assets).map(([k, v]) => `<li><b>${k}</b>: <a href="${v.href}" target="_blank">${v.title}</a> (${v.media_type})</li>`).join('');
-          div.innerHTML = `
-            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem;">
-              <h4 style="color:var(--primary); font-size:0.95rem;">🛰️ ${it.id}</h4>
-              <span class="badge badge-primary">${it.platform}</span>
-            </div>
-            <p style="font-size:0.8rem; color:var(--text-muted); margin-bottom:0.5rem;">Acquisition: <b>${it.datetime}</b> | Cloud: <b>${it.cloud_cover !== null ? it.cloud_cover + '%' : 'N/A'}</b></p>
-            <p style="font-size:0.8rem; margin-bottom:0.5rem;">Bounding Box: <code>${JSON.stringify(it.bbox)}</code></p>
-            <details style="font-size:0.85rem;"><summary style="cursor:pointer; font-weight:600;">COG Assets (${Object.keys(it.assets).length})</summary><ul style="margin-left:1.2rem; margin-top:0.35rem;">${assetsHtml}</ul></details>
-          `;
-          container.appendChild(div);
-        }
+
+        tbody.innerHTML = chks.map(c => `
+          <tr>
+            <td><strong>${escapeHtml(c.filename)}</strong></td>
+            <td>${c.size_mb} MB</td>
+            <td>${c.epoch}</td>
+            <td style="color:var(--accent-emerald);">${typeof c.best_val_iou === 'number' ? (c.best_val_iou * 100).toFixed(1) + '%' : c.best_val_iou}</td>
+            <td>
+              <a href="/studio/api/download/${encodeURIComponent(c.filename)}" class="btn btn-secondary" style="padding:2px 7px; font-size:0.70rem;">Download</a>
+              <button class="btn btn-cyan" style="padding:2px 7px; font-size:0.70rem;" onclick="loadCheckpointForInference('${escapeHtml(c.filename)}')">Load</button>
+            </td>
+          </tr>
+        `).join('');
+
+        chks.forEach(c => {
+          benchSel.innerHTML += `<option value="${escapeHtml(c.filename)}">${escapeHtml(c.filename)} (${c.size_mb} MB)</option>`;
+        });
       } catch (err) {
-        alert('STAC query failed: ' + err);
+        console.warn('Failed loading checkpoints:', err);
       }
     }
 
-    async function validateCatalogUrl() {
-      const url = document.getElementById('catalogUrlInput').value.trim();
-      const resDiv = document.getElementById('catalogCheckResult');
-      resDiv.style.display = 'block';
-      resDiv.innerHTML = '<span style="color:var(--text-muted);">Testing remote COG asset via HTTP HEAD...</span>';
+    async function loadCheckpointForInference(fname) {
       try {
-        const resp = await fetch('/studio/api/catalog/validate', {
+        const resp = await fetch('/studio/api/checkpoints/load', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ url })
+          body: JSON.stringify({ filename: fname })
         });
-        const data = await resp.json();
-        if (data.exists) {
-          resDiv.innerHTML = `<span style="color:var(--success); font-weight:700;">✓ Asset Exists (HTTP ${data.status_code})</span><br><code style="font-size:0.75rem; word-break:break-all;">${data.url}</code>`;
-        } else {
-          resDiv.innerHTML = `<span style="color:var(--danger); font-weight:700;">✗ Broken / Missing Asset (${data.message})</span><br><small style="color:var(--text-muted);">Click "Auto-Heal Path" to find the nearest valid pass date.</small>`;
-        }
+        const res = await resp.json();
+        alert(res.message || 'Checkpoint loaded into active inference backbone.');
       } catch (err) {
-        resDiv.innerHTML = `<span style="color:var(--danger);">Validation failed: ${err}</span>`;
+        alert('Failed loading checkpoint: ' + err);
       }
     }
 
-    async function healCatalogUrl() {
-      const url = document.getElementById('catalogUrlInput').value.trim();
-      const resDiv = document.getElementById('catalogCheckResult');
-      resDiv.style.display = 'block';
-      resDiv.innerHTML = '<span style="color:var(--text-muted);">Querying STAC orbit catalog to resolve valid pass...</span>';
+    async function loadChipsZoo() {
       try {
-        const resp = await fetch('/studio/api/catalog/heal', {
+        const resp = await fetch('/studio/api/chips');
+        const data = await resp.json();
+        const tbody = document.getElementById('chipsTableBody');
+        if (!data.chips || data.chips.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="4" style="color:var(--text-muted); text-align:center;">No chips cached. Click "Generate 70:30 Chips" above.</td></tr>';
+          return;
+        }
+        tbody.innerHTML = data.chips.slice(0, 15).map(c => `
+          <tr>
+            <td><code>${escapeHtml(c.chip_id)}</code></td>
+            <td>${c.size_kb} KB</td>
+            <td style="color:${c.deforestation_pct > 0 ? '#EF4444' : '#10B981'};">${c.deforestation_pct}%</td>
+            <td><span class="badge-pill ${c.class_label === 'DEFOREST' ? 'badge-violation' : 'badge-compliant'}">${c.class_label}</span></td>
+          </tr>
+        `).join('');
+      } catch (err) {
+        console.warn('Failed loading chips zoo:', err);
+      }
+    }
+
+    async function generateSyntheticChips() {
+      try {
+        const resp = await fetch('/studio/api/chips/generate', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ url })
+          body: JSON.stringify({ num_chips: 20, deforest_ratio: 0.70 })
         });
         const data = await resp.json();
-        if (data.success) {
-          document.getElementById('catalogUrlInput').value = data.verified_band_url;
-          resDiv.innerHTML = `
-            <span style="color:var(--success); font-weight:700;">✨ Auto-Healed to Verified Pass!</span><br>
-            <small><b>Resolved Date:</b> ${data.resolved_date} | <b>Granule:</b> ${data.matched_granule_id}</small><br>
-            <code style="font-size:0.75rem; word-break:break-all;">${data.verified_band_url}</code>
-          `;
-        } else {
-          resDiv.innerHTML = `<span style="color:var(--danger); font-weight:700;">Could not auto-heal: ${data.error || 'Unknown error'}</span>`;
-        }
+        alert(`Successfully generated ${data.created_chips} chips! (${data.deforest_chips} DEFOREST, ${data.intact_chips} INTACT enforcing 70:30 quota)`);
+        loadChipsZoo();
+        updateTelemetry();
       } catch (err) {
-        resDiv.innerHTML = `<span style="color:var(--danger);">Auto-heal failed: ${err}</span>`;
+        alert('Chip generation error: ' + err);
       }
     }
 
-    // Startup initialization
+    function escapeHtml(str) {
+      if (!str) return '';
+      return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    // Startup
     window.addEventListener('DOMContentLoaded', () => {
-      initChart();
+      initCharts();
       initMap();
+      updateTelemetry();
       loadPresets();
       loadCheckpoints();
-      // Run initial inference to populate layers
-      runInference();
+      loadChipsZoo();
+      inspectCurrentChip();
+      runGeospatialInference();
+      setInterval(updateTelemetry, 5000);
     });
   </script>
 </body>
@@ -998,7 +1565,7 @@ def create_studio_app() -> FastAPI:
     app = FastAPI(
         title="GeoFM Web Training Studio & EUDR Compliance Suite",
         description="Interactive Studio for Geospatial AI Deforestation Detection & EUDR Regulatory Audits",
-        version="1.0.0",
+        version="2.0.0",
     )
 
     app.add_middleware(
@@ -1015,11 +1582,12 @@ def create_studio_app() -> FastAPI:
     compliance_mgr = StudioComplianceManager()
     stac_mgr = StudioSTACManager()
     checkpoint_mgr = CheckpointManager()
+    chip_mgr = StudioChipManager()
 
     # --- HTML Studio UI Route ---
     @app.get("/", response_class=HTMLResponse)
     def index():
-        return HTMLResponse(content=STUDIO_HTML, status_code=200)
+      return HTMLResponse(content=STUDIO_HTML, status_code=200)
 
     # --- Studio Training API Endpoints ---
     @app.post("/studio/api/train")
@@ -1034,18 +1602,34 @@ def create_studio_app() -> FastAPI:
             epochs=req.epochs,
             batch_size=req.batch_size,
             num_samples=req.num_samples,
+            async_run=req.async_run,
+            resume=req.resume,
+            cache_dir=req.cache_dir,
         )
         return summary
+
+    @app.post("/studio/api/train/stop")
+    def train_stop_endpoint():
+        training_mgr.stop_training()
+        return {"status": "stopped", "message": "Stop signal delivered to background trainer"}
 
     @app.get("/studio/api/train/status")
     def train_status():
         return {
             "is_training": training_mgr.is_training,
-            "latest_run": training_mgr.latest_run_summary,
+            "current_epoch": training_mgr.current_epoch,
+            "total_epochs": training_mgr.total_epochs,
+            "current_train_loss": training_mgr.current_train_loss,
+            "current_val_loss": training_mgr.current_val_loss,
+            "current_val_iou": training_mgr.current_val_iou,
+            "current_val_f1": training_mgr.current_val_f1,
+            "current_lr": training_mgr.current_lr,
+            "logs": training_mgr.logs,
             "history": training_mgr.latest_history,
+            "latest_run": training_mgr.latest_run_summary,
         }
 
-    # --- Satellite Inference API Endpoints ---
+    # --- Satellite Inference & Benchmarking API Endpoints ---
     @app.post("/studio/api/infer")
     def infer_endpoint(req: InferRequest):
         result = inference_mgr.run_inference(
@@ -1058,6 +1642,30 @@ def create_studio_app() -> FastAPI:
             north=req.north,
         )
         return result
+
+    @app.post("/studio/api/test/benchmark")
+    def test_benchmark_endpoint(req: TestBenchmarkRequest):
+        return inference_mgr.test_benchmark(
+            checkpoint_name=req.checkpoint_name,
+            num_samples=req.num_samples,
+            threshold=req.threshold,
+        )
+
+    @app.post("/studio/api/test/chip")
+    def test_chip_endpoint(req: InspectChipRequest):
+        return inference_mgr.inspect_chip(
+            chip_idx=req.chip_idx,
+            checkpoint_name=req.checkpoint_name,
+            threshold=req.threshold,
+            mmu_ha=req.mmu_ha,
+        )
+
+    @app.post("/studio/api/test/thresholds")
+    def test_thresholds_endpoint(req: ThresholdSweepRequest):
+        return inference_mgr.threshold_sweep(
+            checkpoint_name=req.checkpoint_name,
+            num_samples=req.num_samples,
+        )
 
     # --- EUDR Compliance API Endpoints ---
     @app.get("/studio/api/eudr/presets")
@@ -1100,10 +1708,48 @@ def create_studio_app() -> FastAPI:
     def catalog_heal_endpoint(req: CatalogHealRequest):
         return stac_mgr.heal_url(req.url)
 
-    # --- Checkpoints API Endpoints ---
+    # --- Checkpoints & Zoo API Endpoints ---
     @app.get("/studio/api/checkpoints")
     def checkpoints_endpoint():
         return checkpoint_mgr.list_checkpoints()
+
+    @app.get("/studio/api/download/{filename}")
+    def download_checkpoint_endpoint(filename: str):
+        safe_name = os.path.basename(filename)
+        path = os.path.join(checkpoint_mgr.checkpoint_dir, safe_name)
+        if not os.path.exists(path):
+            raise HTTPException(status_code=404, detail="Checkpoint file not found")
+        return FileResponse(path, filename=safe_name, media_type="application/octet-stream")
+
+    @app.post("/studio/api/checkpoints/load")
+    def load_checkpoint_endpoint(req: LoadCheckpointRequest):
+        safe_name = os.path.basename(req.filename)
+        path = os.path.join(checkpoint_mgr.checkpoint_dir, safe_name)
+        if not os.path.exists(path):
+            raise HTTPException(status_code=404, detail=f"Checkpoint {safe_name} not found")
+        try:
+            chk = torch.load(path, map_location="cpu", weights_only=False)
+            st = chk.get("model_state_dict", chk)
+            model = inference_mgr._get_model("siamese")
+            model.load_state_dict(st, strict=False)
+            return {"status": "success", "message": f"Successfully hot-loaded weights from {safe_name}"}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed loading checkpoint: {str(e)}")
+
+    @app.get("/studio/api/chips")
+    def list_chips_endpoint(limit: int = 100):
+        return chip_mgr.list_chips(limit=limit)
+
+    @app.post("/studio/api/chips/generate")
+    def generate_chips_endpoint(req: GenerateChipsRequest):
+        return chip_mgr.generate_synthetic_chips(num_chips=req.num_chips, deforest_ratio=req.deforest_ratio)
+
+    @app.get("/studio/api/telemetry")
+    def telemetry_endpoint():
+        return get_hardware_telemetry(
+            checkpoint_dir=checkpoint_mgr.checkpoint_dir,
+            cache_dir=chip_mgr.cache_dir,
+        )
 
     return app
 

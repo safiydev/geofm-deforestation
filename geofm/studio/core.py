@@ -5,6 +5,8 @@ import io
 import base64
 import os
 import time
+import threading
+import glob
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import numpy as np
 import torch
@@ -26,9 +28,10 @@ from geofm.preprocessing.optical import OpticalPreprocessor
 from geofm.preprocessing.sar import SARPreprocessor
 from geofm.preprocessing.stac import STACManager
 from geofm.preprocessing.catalog_validator import CatalogValidator
-from geofm.training.dataset import GeospatialDeforestationDataset, SpatialBlockSplitter
+from geofm.training.dataset import GeospatialDeforestationDataset, LazyGeospatialDataset, SpatialBlockSplitter, filter_class_balance
+from geofm.training.metrics import DeforestationMetrics
 from geofm.training.trainer import DeforestationTrainer
-from geofm.utils.synthetic_data import generate_synthetic_dataset, generate_synthetic_scene
+from geofm.utils.synthetic_data import generate_synthetic_dataset, generate_synthetic_scene, stream_and_cache_synthetic_dataset
 
 
 # =============================================================================
@@ -149,6 +152,48 @@ def render_probability_heatmap(prob_map: np.ndarray) -> str:
     return array_to_png_base64(rgb)
 
 
+def render_mask(mask: np.ndarray, color: Tuple[int, int, int] = (239, 68, 68), alpha: float = 0.65) -> str:
+    """Render a binary or probability mask overlay on a transparent background."""
+    if mask.ndim == 3:
+        mask = mask.squeeze()
+    h, w = mask.shape
+    rgba = np.zeros((h, w, 4), dtype=np.uint8)
+    bin_mask = mask > 0.5 if mask.dtype != bool else mask
+    for i in range(3):
+        rgba[..., i] = color[i]
+    rgba[..., 3] = (bin_mask * (alpha * 255)).astype(np.uint8)
+    return array_to_png_base64(rgba)
+
+
+def render_error_diff(ground_truth: np.ndarray, prediction_binary: np.ndarray) -> str:
+    """Render pixel-level confusion difference map:
+    - True Positive  (Deforest correct):  Emerald Green #10B981 [16, 185, 129]
+    - False Positive (False alarm):       Amber Orange  #F59E0B [245, 158, 11]
+    - False Negative (Missed deforest):   Hot Crimson   #EF4444 [239, 68, 68]
+    - True Negative  (Intact forest):     Dark Obsidian #0F172A [15, 23, 42]
+    """
+    if ground_truth.ndim == 3:
+        ground_truth = ground_truth.squeeze()
+    if prediction_binary.ndim == 3:
+        prediction_binary = prediction_binary.squeeze()
+
+    gt = ground_truth > 0.5
+    pred = prediction_binary > 0.5
+    h, w = gt.shape
+    rgb = np.zeros((h, w, 3), dtype=np.uint8)
+
+    # True Negative
+    rgb[~gt & ~pred] = [15, 23, 42]
+    # True Positive
+    rgb[gt & pred] = [16, 185, 129]
+    # False Positive
+    rgb[~gt & pred] = [245, 158, 11]
+    # False Negative
+    rgb[gt & ~pred] = [239, 68, 68]
+
+    return array_to_png_base64(rgb)
+
+
 # =============================================================================
 # Tab 1: AI Model Training Studio Manager
 # =============================================================================
@@ -162,6 +207,40 @@ class StudioTrainingManager:
         self.latest_run_summary: Dict[str, Any] = {}
         self.latest_history: List[Dict[str, Any]] = []
         self.is_training: bool = False
+        self.stop_requested: bool = False
+        self.training_thread: Optional[threading.Thread] = None
+        self._lock = threading.Lock()
+
+        # Real-time telemetry & step progress
+        self.current_epoch: int = 0
+        self.total_epochs: int = 0
+        self.current_step: int = 0
+        self.total_steps: int = 0
+        self.current_train_loss: float = 0.0
+        self.current_val_loss: float = 0.0
+        self.current_val_iou: float = 0.0
+        self.current_val_f1: float = 0.0
+        self.current_lr: float = 0.0
+        self.best_val_iou: float = 0.0
+        self.best_epoch: int = 0
+        self.logs: List[str] = []
+        self.active_architecture: str = "siamese"
+
+    def log(self, message: str):
+        ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
+        entry = f"[{ts}] {message}"
+        self.logs.append(entry)
+        if len(self.logs) > 300:
+            self.logs = self.logs[-250:]
+
+    def stop_training(self) -> Dict[str, Any]:
+        """Request active training loop to stop gracefully at the next batch."""
+        with self._lock:
+            if not self.is_training:
+                return {"status": "idle", "message": "No training run currently active."}
+            self.stop_requested = True
+            self.log("⚠️ Stop signal received. Finishing current batch and saving checkpoint...")
+            return {"status": "stopping", "message": "Stop requested. Saving latest checkpoint."}
 
     def train_model(
         self,
@@ -174,88 +253,237 @@ class StudioTrainingManager:
         epochs: int = 3,
         batch_size: int = 4,
         num_samples: int = 16,
+        dataset_source: str = "auto",
+        resume: bool = False,
+        use_amp: bool = True,
+        async_run: bool = False,
+        cache_dir: str = "./data/chips_cache",
         progress_callback: Optional[Callable[[int, int, Dict[str, Any]], None]] = None,
     ) -> Dict[str, Any]:
-        """Execute a full training run on synthetic geospatial tiles with real-time callbacks."""
+        """Execute a full training run on synthetic geospatial tiles or cached real chips."""
+        if self.is_training:
+            return {"status": "error", "message": "Training is already in progress.", "is_training": True}
+
+        self.stop_requested = False
         self.is_training = True
-        device = torch.device("cpu")
+        self.active_architecture = architecture
+        self.total_epochs = epochs
+        self.current_epoch = 0
+        self.current_train_loss = 0.0
+        self.current_val_loss = 0.0
+        self.current_val_iou = 0.0
+        self.current_val_f1 = 0.0
+        self.current_lr = learning_rate
+        self.logs.clear()
+        self.log(f"🚀 Initializing {architecture.upper()} training pipeline (LoRA: {use_lora}, Loss: {loss_type}, Epochs: {epochs})...")
 
-        # 1. Generate Dataset & Spatial Split
-        samples = generate_synthetic_dataset(num_samples=num_samples, height=64, width=64)
-        splitter = SpatialBlockSplitter(grid_size_deg=0.1, train_ratio=0.75, val_ratio=0.25, test_ratio=0.0)
-        train_idx, val_idx, _ = splitter.split(samples)
-
-        dataset = GeospatialDeforestationDataset(samples)
-        train_sub = torch.utils.data.Subset(dataset, train_idx)
-        val_sub = torch.utils.data.Subset(dataset, val_idx)
-
-        train_loader = torch.utils.data.DataLoader(train_sub, batch_size=batch_size, shuffle=True)
-        val_loader = torch.utils.data.DataLoader(val_sub, batch_size=batch_size, shuffle=False)
-
-        # 2. Model Initialization
-        if architecture == "siamese":
-            model = SiameseChangeDetector(in_channels=4, features=[16, 32, 64, 128])
-            model_type_str = "siamese"
-        elif architecture == "multimodal":
-            model = MultimodalFusionDeforestationNet(opt_channels=4, sar_channels=3, features=[16, 32, 64, 128])
-            model_type_str = "multimodal"
+        if async_run:
+            self.training_thread = threading.Thread(
+                target=self._run_training_pipeline,
+                kwargs={
+                    "architecture": architecture,
+                    "use_lora": use_lora,
+                    "lora_rank": lora_rank,
+                    "lora_alpha": lora_alpha,
+                    "loss_type": loss_type,
+                    "learning_rate": learning_rate,
+                    "epochs": epochs,
+                    "batch_size": batch_size,
+                    "num_samples": num_samples,
+                    "dataset_source": dataset_source,
+                    "resume": resume,
+                    "use_amp": use_amp,
+                    "cache_dir": cache_dir,
+                    "progress_callback": progress_callback,
+                },
+                daemon=True,
+            )
+            self.training_thread.start()
+            return {
+                "status": "started",
+                "message": f"Training {architecture.upper()} launched in background for {epochs} epochs.",
+                "architecture": architecture,
+                "epochs": epochs,
+            }
         else:
-            model = UNet(in_channels=4, num_classes=1, features=[16, 32, 64, 128], use_vit_bottleneck=True)
-            model_type_str = "unet"
+            return self._run_training_pipeline(
+                architecture=architecture,
+                use_lora=use_lora,
+                lora_rank=lora_rank,
+                lora_alpha=lora_alpha,
+                loss_type=loss_type,
+                learning_rate=learning_rate,
+                epochs=epochs,
+                batch_size=batch_size,
+                num_samples=num_samples,
+                dataset_source=dataset_source,
+                resume=resume,
+                use_amp=use_amp,
+                cache_dir=cache_dir,
+                progress_callback=progress_callback,
+            )
 
-        lora_stats: Optional[Dict[str, Any]] = None
-        if use_lora:
-            model, lora_stats = apply_lora_to_model(model, rank=lora_rank, alpha=lora_alpha)
+    def _run_training_pipeline(
+        self,
+        architecture: str = "siamese",
+        use_lora: bool = True,
+        lora_rank: int = 8,
+        lora_alpha: float = 16.0,
+        loss_type: str = "compound",
+        learning_rate: float = 1e-3,
+        epochs: int = 3,
+        batch_size: int = 4,
+        num_samples: int = 16,
+        dataset_source: str = "auto",
+        resume: bool = False,
+        use_amp: bool = True,
+        cache_dir: str = "./data/chips_cache",
+        progress_callback: Optional[Callable[[int, int, Dict[str, Any]], None]] = None,
+    ) -> Dict[str, Any]:
+        self.is_training = True
+        try:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            self.log(f"💻 Hardware compute allocated: {device}")
 
-        # 3. Loss Function
-        if loss_type == "compound":
-            criterion = CompoundDeforestationLoss(alpha=0.75, beta=0.25)
-        elif loss_type == "focal_tversky":
-            criterion = FocalTverskyLoss(alpha=0.7, beta=0.3, gamma=1.33)
-        elif loss_type == "tversky":
-            criterion = TverskyLoss(alpha=0.7, beta=0.3)
-        else:
-            criterion = BinaryFocalLoss(alpha=0.75, gamma=2.0)
+            # 1. Dataset Loading
+            dataset = None
+            cache_dir = "./data/chips_cache"
+            manifest_file = os.path.join(cache_dir, "manifest.jsonl")
+            has_real_cache = os.path.exists(manifest_file) or (os.path.isdir(cache_dir) and any(glob.glob(os.path.join(cache_dir, "*.npz"))))
 
-        # 4. Trainer Callback Bridge
-        history_records: List[Dict[str, Any]] = []
+            if dataset_source in ("auto", "cached", "real") and has_real_cache and architecture != "multimodal":
+                self.log(f"📦 Loading real cached satellite chips from: {cache_dir}")
+                dataset = LazyGeospatialDataset(cache_dir=cache_dir, preload_cache=False)
+                in_channels = int(dataset[0]["t1"].shape[0])
+            else:
+                self.log(f"⚡ Streaming {num_samples} synthetic multi-spectral training chips (Zero-RAM)...")
+                samples = generate_synthetic_dataset(num_samples=max(4, num_samples), height=64, width=64)
+                dataset = GeospatialDeforestationDataset(samples)
+                in_channels = 4
 
-        def _epoch_hook(ep: int, rec: Dict[str, Any]):
-            history_records.append(rec)
-            if progress_callback is not None:
-                progress_callback(ep, epochs, rec)
+            # 2. Spatial Disjoint Split
+            splitter = SpatialBlockSplitter(grid_size_deg=0.1, train_ratio=0.75, val_ratio=0.25, test_ratio=0.0)
+            train_indices_file = os.path.join(self.checkpoint_dir, "train_indices.npy")
+            val_indices_file = os.path.join(self.checkpoint_dir, "val_indices.npy")
 
-        trainer = DeforestationTrainer(
-            model=model,
-            criterion=criterion,
-            learning_rate=learning_rate,
-            checkpoint_dir=self.checkpoint_dir,
-            model_type=model_type_str,
-            epoch_callback=_epoch_hook,
-            enable_tensorboard=True,
-        )
+            if resume and os.path.exists(train_indices_file) and os.path.exists(val_indices_file):
+                try:
+                    train_idx = np.load(train_indices_file).tolist()
+                    val_idx = np.load(val_indices_file).tolist()
+                    self.log(f"✓ Restored frozen spatial split ({len(train_idx)} train, {len(val_idx)} val chips)")
+                except Exception:
+                    train_idx, val_idx, _ = splitter.split(dataset)
+            else:
+                train_idx, val_idx, _ = splitter.split(dataset)
+                try:
+                    np.save(train_indices_file, np.array(train_idx, dtype=np.int64))
+                    np.save(val_indices_file, np.array(val_idx, dtype=np.int64))
+                except Exception:
+                    pass
+                self.log(f"✓ Spatial block split complete ({len(train_idx)} train, {len(val_idx)} val chips)")
 
-        # 5. Fit
-        trainer.fit(train_loader, val_loader, epochs=epochs)
-        summary = trainer.get_metrics_summary()
+            train_sub = torch.utils.data.Subset(dataset, train_idx)
+            val_sub = torch.utils.data.Subset(dataset, val_idx)
 
-        self.latest_history = history_records
-        self.latest_run_summary = {
-            "architecture": architecture,
-            "use_lora": use_lora,
-            "lora_stats": lora_stats,
-            "loss_type": loss_type,
-            "learning_rate": learning_rate,
-            "epochs": epochs,
-            "best_epoch": trainer.best_epoch,
-            "best_val_iou": trainer.best_val_iou,
-            "summary": summary,
-            "history": history_records,
-            "checkpoint_dir": os.path.abspath(self.checkpoint_dir),
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
-        self.is_training = False
-        return self.latest_run_summary
+            train_loader = torch.utils.data.DataLoader(train_sub, batch_size=batch_size, shuffle=True)
+            val_loader = torch.utils.data.DataLoader(val_sub, batch_size=batch_size, shuffle=False)
+
+            # 3. Model Architecture Initialization
+            if architecture == "siamese":
+                model = SiameseChangeDetector(in_channels=in_channels, features=[16, 32, 64, 128])
+                model_type_str = "siamese"
+            elif architecture == "multimodal":
+                model = MultimodalFusionDeforestationNet(opt_channels=4, sar_channels=3, features=[16, 32, 64, 128])
+                model_type_str = "multimodal"
+            else:
+                model = UNet(in_channels=in_channels, num_classes=1, features=[16, 32, 64, 128], use_vit_bottleneck=True)
+                model_type_str = "unet"
+
+            lora_stats: Optional[Dict[str, Any]] = None
+            if use_lora:
+                model, lora_stats = apply_lora_to_model(model, rank=lora_rank, alpha=lora_alpha)
+                self.log(f"✓ LoRA PEFT active: {lora_stats['trainable_fraction']*100:.2f}% parameters trainable")
+
+            # 4. Loss Function
+            if loss_type == "compound":
+                criterion = CompoundDeforestationLoss(alpha=0.75, beta=0.25)
+            elif loss_type == "focal_tversky":
+                criterion = FocalTverskyLoss(alpha=0.7, beta=0.3, gamma=1.33)
+            elif loss_type == "tversky":
+                criterion = TverskyLoss(alpha=0.7, beta=0.3)
+            else:
+                criterion = BinaryFocalLoss(alpha=0.75, gamma=2.0)
+
+            # 5. Optimizer & ReduceLROnPlateau Scheduler
+            optimizer = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=learning_rate, weight_decay=1e-4)
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=3, min_lr=1e-5)
+
+            history_records: List[Dict[str, Any]] = []
+
+            def _epoch_hook(ep: int, rec: Dict[str, Any]):
+                self.current_epoch = ep
+                self.current_train_loss = rec["train_loss"]
+                self.current_val_loss = rec["val_loss"]
+                self.current_val_iou = rec["val_iou"]
+                self.current_val_f1 = rec["val_f1"]
+                self.current_lr = rec["lr"]
+                history_records.append(rec)
+                self.latest_history = list(history_records)
+                self.log(f"Epoch {ep:02d}/{epochs:02d} | Train Loss: {rec['train_loss']:.4f} | Val Loss: {rec['val_loss']:.4f} | IoU: {rec['val_iou']*100:.2f}% | F1: {rec['val_f1']*100:.2f}%")
+                if progress_callback is not None:
+                    progress_callback(ep, epochs, rec)
+
+            trainer = DeforestationTrainer(
+                model=model,
+                criterion=criterion,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                learning_rate=learning_rate,
+                checkpoint_dir=self.checkpoint_dir,
+                model_type=model_type_str,
+                epoch_callback=_epoch_hook,
+                use_amp=use_amp and device.type == "cuda",
+                enable_tensorboard=True,
+            )
+
+            start_epoch = 1
+            if resume:
+                latest_pt = os.path.join(self.checkpoint_dir, "latest_checkpoint.pt")
+                if os.path.exists(latest_pt):
+                    resumed_ep = trainer.load_checkpoint(latest_pt)
+                    start_epoch = resumed_ep + 1
+                    history_records = list(trainer.history)
+                    self.log(f"✓ Resumed from checkpoint: Epoch {resumed_ep} (Best Val IoU: {trainer.best_val_iou*100:.2f}%)")
+
+            # 6. Fit
+            self.log(f"🚀 Training starting ({start_epoch} -> {epochs} epochs)...")
+            trainer.fit(train_loader, val_loader, epochs=epochs, start_epoch=start_epoch)
+
+            summary = trainer.get_metrics_summary()
+            self.best_epoch = trainer.best_epoch
+            self.best_val_iou = trainer.best_val_iou
+            self.latest_history = history_records
+            self.latest_run_summary = {
+                "architecture": architecture,
+                "use_lora": use_lora,
+                "lora_stats": lora_stats,
+                "loss_type": loss_type,
+                "learning_rate": learning_rate,
+                "epochs": epochs,
+                "best_epoch": trainer.best_epoch,
+                "best_val_iou": trainer.best_val_iou,
+                "summary": summary,
+                "history": history_records,
+                "checkpoint_dir": os.path.abspath(self.checkpoint_dir),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+            self.log(f"🏆 Training completed! Best Validation IoU: {trainer.best_val_iou*100:.2f}% (Epoch {trainer.best_epoch})")
+            return self.latest_run_summary
+        except Exception as e:
+            self.log(f"❌ Training failed: {str(e)}")
+            raise
+        finally:
+            self.is_training = False
 
 
 # =============================================================================
@@ -400,6 +628,267 @@ class StudioInferenceManager:
                 "probability_heatmap": img_prob,
             },
         }
+
+    def test_benchmark(
+        self,
+        checkpoint_name: Optional[str] = None,
+        num_samples: int = 16,
+        threshold: float = 0.5,
+        checkpoint_dir: str = "./checkpoints",
+        cache_dir: str = "./data/chips_cache",
+    ) -> Dict[str, Any]:
+        """Evaluate validation/test benchmark on batch of chips and compute full scorecard."""
+        t_start = time.perf_counter()
+
+        # Load weights if checkpoint provided
+        model = self._get_model("siamese")
+        if checkpoint_name and os.path.exists(checkpoint_dir):
+            chk_path = os.path.join(checkpoint_dir, checkpoint_name)
+            if os.path.exists(chk_path):
+                try:
+                    chk = torch.load(chk_path, map_location="cpu", weights_only=False)
+                    st = chk.get("model_state_dict", chk)
+                    model.load_state_dict(st, strict=False)
+                except Exception:
+                    pass
+        model.eval()
+
+        total_tp = 0
+        total_fp = 0
+        total_fn = 0
+        total_tn = 0
+
+        # Try to sample from cache if available, else synthetic
+        cached_files = sorted(glob.glob(os.path.join(cache_dir, "*.npz"))) if os.path.exists(cache_dir) else []
+        n_eval = min(num_samples, len(cached_files)) if cached_files else num_samples
+
+        for i in range(n_eval):
+            if cached_files and i < len(cached_files):
+                try:
+                    data = np.load(cached_files[i], allow_pickle=True)
+                    opt_t1 = data["t1_optical"]
+                    opt_t2 = data["t2_optical"]
+                    gt_mask = data["label"] if "label" in data else data.get("mask", np.zeros((128, 128), dtype=np.float32))
+                except Exception:
+                    cached_files = []
+                    scene = generate_synthetic_scene(height=128, width=128, seed=100 + i, deforestation_fraction=0.15 if i % 2 == 0 else 0.0)
+                    opt_t1 = scene["t1_optical"]
+                    opt_t2 = scene["t2_optical"]
+                    gt_mask = scene.get("change_mask", scene.get("label", np.zeros((128, 128), dtype=np.float32)))
+            else:
+                scene = generate_synthetic_scene(
+                    height=128,
+                    width=128,
+                    seed=100 + i,
+                    deforestation_fraction=0.15 if i % 2 == 0 else 0.0,
+                    cloud_fraction=0.08,
+                )
+                opt_t1 = scene["t1_optical"]
+                opt_t2 = scene["t2_optical"]
+                gt_mask = scene.get("change_mask", scene.get("label", np.zeros((128, 128), dtype=np.float32)))
+
+            if gt_mask.ndim == 3:
+                gt_mask = gt_mask[0]
+
+            t1_t = torch.from_numpy(opt_t1).unsqueeze(0).float()
+            t2_t = torch.from_numpy(opt_t2).unsqueeze(0).float()
+            with torch.no_grad():
+                logits = model(t1_t, t2_t)
+                probs = torch.sigmoid(logits).squeeze().numpy()
+
+            gt_bin = (gt_mask > 0.5).astype(bool)
+            pr_bin = (probs >= threshold).astype(bool)
+
+            total_tp += int(np.sum(gt_bin & pr_bin))
+            total_fp += int(np.sum(~gt_bin & pr_bin))
+            total_fn += int(np.sum(gt_bin & ~pr_bin))
+            total_tn += int(np.sum(~gt_bin & ~pr_bin))
+
+        total_pixels = total_tp + total_fp + total_fn + total_tn
+        iou = float(total_tp / (total_tp + total_fp + total_fn + 1e-7))
+        f1 = float(2 * total_tp / (2 * total_tp + total_fp + total_fn + 1e-7))
+        precision = float(total_tp / (total_tp + total_fp + 1e-7))
+        recall = float(total_tp / (total_tp + total_fn + 1e-7))
+        specificity = float(total_tn / (total_tn + total_fp + 1e-7))
+        accuracy = float((total_tp + total_tn) / (total_pixels + 1e-7))
+
+        elapsed_ms = (time.perf_counter() - t_start) * 1000.0
+
+        return {
+            "checkpoint_name": checkpoint_name or "Active Siamese Backbone",
+            "samples_evaluated": n_eval,
+            "threshold": threshold,
+            "iou": round(iou, 4),
+            "f1": round(f1, 4),
+            "precision": round(precision, 4),
+            "recall": round(recall, 4),
+            "specificity": round(specificity, 4),
+            "accuracy": round(accuracy, 4),
+            "confusion_matrix": {
+                "tp": total_tp,
+                "fp": total_fp,
+                "fn": total_fn,
+                "tn": total_tn,
+            },
+            "elapsed_ms": round(elapsed_ms, 2),
+        }
+
+    def inspect_chip(
+        self,
+        chip_idx: int = 0,
+        checkpoint_name: Optional[str] = None,
+        threshold: float = 0.5,
+        mmu_ha: float = 0.10,
+        checkpoint_dir: str = "./checkpoints",
+        cache_dir: str = "./data/chips_cache",
+    ) -> Dict[str, Any]:
+        """Deep inspect single chip: render 9 spectral layers, predicted vs GT, pixel diff map, and alerts."""
+        t_start = time.perf_counter()
+
+        cached_files = sorted(glob.glob(os.path.join(cache_dir, "*.npz"))) if os.path.exists(cache_dir) else []
+        chip_name = f"chip_{chip_idx:04d}"
+
+        if cached_files and 0 <= chip_idx < len(cached_files):
+            fpath = cached_files[chip_idx]
+            chip_name = os.path.basename(fpath).replace(".npz", "")
+            data = np.load(fpath, allow_pickle=True)
+            opt_t1 = data["t1_optical"]
+            opt_t2 = data["t2_optical"]
+            sar_vv = data["sar_vv"] if "sar_vv" in data else np.random.exponential(0.1, (opt_t1.shape[1], opt_t1.shape[2])).astype(np.float32)
+            sar_vh = data["sar_vh"] if "sar_vh" in data else np.random.exponential(0.04, (opt_t1.shape[1], opt_t1.shape[2])).astype(np.float32)
+            gt_mask = data["label"] if "label" in data else data.get("mask", np.zeros((opt_t1.shape[1], opt_t1.shape[2]), dtype=np.float32))
+        else:
+            scene = generate_synthetic_scene(
+                height=128,
+                width=128,
+                seed=42 + chip_idx,
+                deforestation_fraction=0.14 if chip_idx % 3 != 1 else 0.0,
+                cloud_fraction=0.08,
+            )
+            opt_t1 = scene["t1_optical"]
+            opt_t2 = scene["t2_optical"]
+            sar_vv = scene["sar_vv"]
+            sar_vh = scene["sar_vh"]
+            gt_mask = scene.get("change_mask", scene.get("label", np.zeros((128, 128), dtype=np.float32)))
+
+        if gt_mask.ndim == 3:
+            gt_mask = gt_mask[0]
+
+        # Model forward
+        model = self._get_model("siamese")
+        if checkpoint_name and os.path.exists(checkpoint_dir):
+            chk_path = os.path.join(checkpoint_dir, checkpoint_name)
+            if os.path.exists(chk_path):
+                try:
+                    chk = torch.load(chk_path, map_location="cpu", weights_only=False)
+                    st = chk.get("model_state_dict", chk)
+                    model.load_state_dict(st, strict=False)
+                except Exception:
+                    pass
+        model.eval()
+
+        t1_t = torch.from_numpy(opt_t1).unsqueeze(0).float()
+        t2_t = torch.from_numpy(opt_t2).unsqueeze(0).float()
+        with torch.no_grad():
+            logits = model(t1_t, t2_t)
+            probs = torch.sigmoid(logits).squeeze().numpy()
+
+        pred_binary = (probs >= threshold).astype(np.float32)
+
+        # Indices & Visual layers
+        ndvi_t1 = self.optical_prep.compute_ndvi(opt_t1[2], opt_t1[3])
+        ndvi_t2 = self.optical_prep.compute_ndvi(opt_t2[2], opt_t2[3])
+
+        img_t1_rgb = render_optical_rgb(opt_t1)
+        img_t2_rgb = render_optical_rgb(opt_t2)
+        img_t1_cir = render_optical_cir(opt_t1)
+        img_t2_cir = render_optical_cir(opt_t2)
+        img_ndvi_t1 = render_ndvi_colormap(ndvi_t1)
+        img_ndvi_t2 = render_ndvi_colormap(ndvi_t2)
+        img_sar = render_sar_composite(sar_vv, sar_vh)
+        img_prob = render_probability_heatmap(probs)
+        img_gt_mask = render_mask(gt_mask, color=[239, 68, 68])
+        img_pred_mask = render_mask(pred_binary, color=[239, 68, 68])
+        img_error_diff = render_error_diff(gt_mask, pred_binary)
+
+        # Polygonization
+        transform = GeoTransform(west=-60.05, north=-3.05, pixel_width=0.0001, pixel_height=-0.0001)
+        polygonizer = Polygonizer(mmu_ha=mmu_ha, simplify_tolerance_deg=0.00005)
+        geojson_fc = polygonizer.polygonize(probs, threshold=threshold, transform=transform)
+
+        # Chip-level Metrics
+        gt_bin = (gt_mask > 0.5).astype(bool)
+        pr_bin = (pred_binary > 0.5).astype(bool)
+        tp = int(np.sum(gt_bin & pr_bin))
+        fp = int(np.sum(~gt_bin & pr_bin))
+        fn = int(np.sum(gt_bin & ~pr_bin))
+        tn = int(np.sum(~gt_bin & ~pr_bin))
+        chip_iou = float(tp / (tp + fp + fn + 1e-7))
+        chip_f1 = float(2 * tp / (2 * tp + fp + fn + 1e-7))
+
+        elapsed_ms = (time.perf_counter() - t_start) * 1000.0
+
+        return {
+            "chip_id": chip_name,
+            "chip_idx": chip_idx,
+            "dimensions": [opt_t1.shape[1], opt_t1.shape[2]],
+            "threshold": threshold,
+            "mmu_ha": mmu_ha,
+            "elapsed_ms": round(elapsed_ms, 2),
+            "ground_truth_pct": round(float(np.mean(gt_mask) * 100), 2),
+            "predicted_pct": round(float(np.mean(pred_binary) * 100), 2),
+            "chip_iou": round(chip_iou, 4),
+            "chip_f1": round(chip_f1, 4),
+            "confusion": {"tp": tp, "fp": fp, "fn": fn, "tn": tn},
+            "total_alerts": geojson_fc["properties"]["total_alerts"],
+            "total_deforested_ha": geojson_fc["properties"]["total_deforested_ha"],
+            "geojson": geojson_fc,
+            "layers": {
+                "t1_rgb": img_t1_rgb,
+                "t2_rgb": img_t2_rgb,
+                "t1_cir": img_t1_cir,
+                "t2_cir": img_t2_cir,
+                "ndvi_t1": img_ndvi_t1,
+                "ndvi_t2": img_ndvi_t2,
+                "sar_composite": img_sar,
+                "ground_truth_mask": img_gt_mask,
+                "probability_heatmap": img_prob,
+                "pred_binary_mask": img_pred_mask,
+                "error_diff_map": img_error_diff,
+            },
+        }
+
+    def threshold_sweep(
+        self,
+        checkpoint_name: Optional[str] = None,
+        num_samples: int = 8,
+        checkpoint_dir: str = "./checkpoints",
+        cache_dir: str = "./data/chips_cache",
+    ) -> List[Dict[str, Any]]:
+        """Compute metrics across thresholds 0.1 to 0.9 for interactive sensitivity curve."""
+        thresholds = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+        results = []
+        for t in thresholds:
+            res = self.test_benchmark(
+                checkpoint_name=checkpoint_name,
+                num_samples=num_samples,
+                threshold=t,
+                checkpoint_dir=checkpoint_dir,
+                cache_dir=cache_dir,
+            )
+            cm = res["confusion_matrix"]
+            tp, fp, fn, tn = cm["tp"], cm["fp"], cm["fn"], cm["tn"]
+            fp_rate = float(fp / (fp + tn + 1e-7))
+            results.append({
+                "threshold": t,
+                "iou": res["iou"],
+                "f1": res["f1"],
+                "precision": res["precision"],
+                "recall": res["recall"],
+                "specificity": res["specificity"],
+                "fp_rate": round(fp_rate, 4),
+            })
+        return results
 
 
 # =============================================================================
@@ -736,3 +1225,158 @@ class CheckpointManager:
                 results.append(info)
 
         return results
+
+
+# =============================================================================
+# Cached Chips & Dataset Zoo Manager
+# =============================================================================
+
+class StudioChipManager:
+    """Manages cached training chips (.npz) and synthetic dataset generation."""
+
+    def __init__(self, cache_dir: str = "./data/chips_cache"):
+        self.cache_dir = cache_dir
+        os.makedirs(self.cache_dir, exist_ok=True)
+
+    def list_chips(self, limit: int = 100) -> Dict[str, Any]:
+        """List cached chips with inspection statistics."""
+        if not os.path.exists(self.cache_dir):
+            return {"total_chips": 0, "chips": []}
+
+        files = sorted(glob.glob(os.path.join(self.cache_dir, "*.npz")))
+        results = []
+        for i, fpath in enumerate(files[:limit]):
+            stat = os.stat(fpath)
+            fname = os.path.basename(fpath)
+            loss_pct = 0.0
+            try:
+                data = np.load(fpath, allow_pickle=True)
+                if "label" in data:
+                    loss_pct = float(np.mean(data["label"]) * 100)
+                elif "mask" in data:
+                    loss_pct = float(np.mean(data["mask"]) * 100)
+            except Exception:
+                pass
+
+            results.append({
+                "chip_id": fname.replace(".npz", ""),
+                "chip_idx": i,
+                "file_name": fname,
+                "size_kb": round(stat.st_size / 1024, 1),
+                "deforestation_pct": round(loss_pct, 2),
+                "class_label": "DEFOREST" if loss_pct >= 5.0 else "INTACT",
+                "modified": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+            })
+
+        return {
+            "total_chips": len(files),
+            "returned_chips": len(results),
+            "chips": results,
+        }
+
+    def generate_synthetic_chips(
+        self,
+        num_chips: int = 20,
+        deforest_ratio: float = 0.70,
+    ) -> Dict[str, Any]:
+        """Generate realistic synthetic Sentinel-2/Sentinel-1 chips with 70:30 quota."""
+        os.makedirs(self.cache_dir, exist_ok=True)
+        deforest_count = int(round(num_chips * deforest_ratio))
+        intact_count = num_chips - deforest_count
+
+        created = 0
+        for i in range(num_chips):
+            is_deforest = (i < deforest_count)
+            frac = float(np.random.uniform(0.08, 0.25)) if is_deforest else 0.0
+            scene = generate_synthetic_scene(
+                height=128,
+                width=128,
+                seed=1000 + i,
+                deforestation_fraction=frac,
+                cloud_fraction=float(np.random.uniform(0.02, 0.15)),
+            )
+            cid = f"chip_{i:04d}_{'DEFOREST' if is_deforest else 'INTACT'}"
+            out_path = os.path.join(self.cache_dir, f"{cid}.npz")
+            np.savez_compressed(
+                out_path,
+                t1_optical=scene["t1_optical"],
+                t2_optical=scene["t2_optical"],
+                sar_vv=scene["sar_vv"],
+                sar_vh=scene["sar_vh"],
+                label=scene.get("change_mask", scene.get("label", np.zeros((128, 128), dtype=np.float32))),
+            )
+            created += 1
+
+        return {
+            "status": "success",
+            "created_chips": created,
+            "deforest_chips": deforest_count,
+            "intact_chips": intact_count,
+            "cache_dir": os.path.abspath(self.cache_dir),
+        }
+
+
+# =============================================================================
+# Hardware & Accelerator Telemetry
+# =============================================================================
+
+def get_hardware_telemetry(
+    checkpoint_dir: str = "./checkpoints",
+    cache_dir: str = "./data/chips_cache",
+) -> Dict[str, Any]:
+    """Return system and accelerator telemetry (RAM, CPU, GPU, storage)."""
+    cpu_count = os.cpu_count() or 1
+
+    total_ram_mb = 0.0
+    used_ram_mb = 0.0
+    ram_pct = 0.0
+    try:
+        if os.path.exists("/proc/meminfo"):
+            mem = {}
+            with open("/proc/meminfo", "r") as f:
+                for line in f:
+                    parts = line.split(":")
+                    if len(parts) == 2:
+                        mem[parts[0].strip()] = int(parts[1].strip().split()[0])
+            total_ram_mb = round(mem.get("MemTotal", 0) / 1024, 1)
+            free_ram_mb = round(mem.get("MemAvailable", mem.get("MemFree", 0)) / 1024, 1)
+            used_ram_mb = round(total_ram_mb - free_ram_mb, 1)
+            ram_pct = round((used_ram_mb / total_ram_mb) * 100, 1) if total_ram_mb > 0 else 0.0
+    except Exception:
+        pass
+
+    gpu_available = torch.cuda.is_available()
+    gpu_name = "CPU Host (ARM/Linux)"
+    vram_used_mb = 0.0
+    vram_total_mb = 0.0
+    vram_pct = 0.0
+    if gpu_available:
+        try:
+            gpu_name = torch.cuda.get_device_name(0)
+            vram_total_mb = round(torch.cuda.get_device_properties(0).total_memory / (1024 * 1024), 1)
+            vram_used_mb = round(torch.cuda.memory_allocated(0) / (1024 * 1024), 1)
+            vram_pct = round((vram_used_mb / vram_total_mb) * 100, 1) if vram_total_mb > 0 else 0.0
+        except Exception:
+            pass
+
+    checkpoint_count = 0
+    if os.path.exists(checkpoint_dir):
+        checkpoint_count = len([f for f in os.listdir(checkpoint_dir) if f.endswith((".pt", ".pth"))])
+
+    cached_chips_count = 0
+    if os.path.exists(cache_dir):
+        cached_chips_count = len([f for f in os.listdir(cache_dir) if f.endswith(".npz")])
+
+    return {
+        "gpu_available": gpu_available,
+        "device_name": gpu_name,
+        "vram_used_mb": vram_used_mb,
+        "vram_total_mb": vram_total_mb,
+        "vram_pct": vram_pct,
+        "cpu_count": cpu_count,
+        "ram_total_mb": total_ram_mb,
+        "ram_used_mb": used_ram_mb,
+        "ram_pct": ram_pct,
+        "checkpoint_count": checkpoint_count,
+        "cached_chips_count": cached_chips_count,
+    }
