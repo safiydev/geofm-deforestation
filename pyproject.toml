@@ -6,11 +6,36 @@ build-backend = "setuptools.build_meta"
 name = "geofm-deforestation"
 version = "1.0.0"
 description = "Geospatial AI for Early Deforestation Detection and EUDR Regulatory Compliance"
-authors = [
-    { name = "Antigravity Remote Sensing Engineering Team" }
-]
 readme = "README.md"
+license = { text = "Apache-2.0" }
 requires-python = ">=3.9"
+authors = [
+    { name = "Safiyyulloh & Antigravity Remote Sensing Engineering Team", email = "safiydev@users.noreply.github.com" }
+]
+keywords = [
+    "remote-sensing",
+    "geospatial-ai",
+    "deforestation-detection",
+    "sentinel-2",
+    "sentinel-1",
+    "earth-engine",
+    "eudr-compliance",
+    "lora-peft",
+    "pytorch",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: GIS",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
     "torch",
     "numpy",
@@ -22,6 +47,12 @@ dependencies = [
     "tifffile",
     "earthengine-api",
 ]
+
+[project.urls]
+Homepage = "https://safiydev.github.io/geofm-deforestation/"
+Documentation = "https://safiydev.github.io/geofm-deforestation/"
+Repository = "https://github.com/safiydev/geofm-deforestation"
+Issues = "https://github.com/safiydev/geofm-deforestation/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]

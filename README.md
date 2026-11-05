@@ -3,7 +3,10 @@
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-orange.svg)](https://pytorch.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-green.svg)](https://fastapi.tiangolo.com/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![GitHub Pages](https://img.shields.io/badge/docs-GitHub%20Pages-06B6D4.svg)](https://safiydev.github.io/geofm-deforestation/)
+[![CI](https://github.com/safiydev/geofm-deforestation/actions/workflows/ci.yml/badge.svg)](https://github.com/safiydev/geofm-deforestation/actions)
+[![Tests](https://img.shields.io/badge/Tests-87%20passed-10B981.svg)](tests/)
 
 A production-grade, multimodal Geospatial Artificial Intelligence system engineered for near-real-time tropical deforestation early warning, Vision Transformer (ViT) change detection, Parameter-Efficient Fine-Tuning (PEFT/LoRA), and European Union Deforestation Regulation (EUDR, Regulation (EU) 2023/1115) compliance auditing.
 
@@ -85,7 +88,7 @@ A production-grade, multimodal Geospatial Artificial Intelligence system enginee
 ## Installation
 
 ```bash
-git clone https://github.com/example/geofm-deforestation.git
+git clone https://github.com/safiydev/geofm-deforestation.git
 cd geofm-deforestation
 pip install -e .
 ```
@@ -190,19 +193,20 @@ uvicorn geofm.api.app:app --host 0.0.0.0 --port 8000 --reload
 - `POST /api/v1/webhooks/register`: Subscribes external systems to alert streams with HMAC-SHA256 signature verification.
 
 ### 8. Interactive Web Training Studio & EUDR Suite (`studio.py` / `geofm/studio/`)
-Self-contained interactive visual suite with dual runtime support (Streamlit & Standalone FastAPI + Leaflet.js + Chart.js):
-- **Tab 1: AI Model Training Studio**: Select architecture (Siamese Change Detector, U-Net ViT Hybrid, Multimodal Cross-Attention), configure LoRA PEFT ($r=2..64, \alpha=4..128$), select class-imbalanced compound loss, tune learning rate/epochs, trigger training runs with real-time loss & IoU curves, and inspect saved checkpoint metadata.
-- **Tab 2: Satellite Inference & Interactive Map**: Generate bitemporal satellite scenes ($T_1$ vs $T_2$, Sentinel-2 RGB/NIR, NDVI, Sentinel-1 SAR VV/VH), run neural inference with configurable probability threshold and Minimum Mapping Unit (MMU ha), and plot detected deforestation clusters on interactive Leaflet maps with severity levels (Critical, High, Medium).
-- **Tab 3: EUDR Due Diligence & Regulatory Compliance**: Upload or test farm plots against legal mandates under Regulation (EU) 2023/1115 (Dec 31, 2020 cutoff, $\le 4\,\text{ha}$ point vs $> 4\,\text{ha}$ polygon, $\ge 6$ decimal precision, Annex I commodities), intersect with AI alerts, compute Olofsson et al. (2014) area-adjusted accuracy with 95% confidence intervals, and generate compliance audit verdicts.
-- **Tab 4: STAC Satellite Catalog Explorer**: Query Sentinel-2 and Sentinel-1 STAC items across Amazon, Congo, and Borneo biomes by bounding box, date range, and cloud cover.
+High-performance, dark glassmorphic control room dashboard engineered to completely replace Google Colab workflows:
+- **Tab 1: AI Model Training Studio**: Select architecture (Siamese Change Detector, Multimodal Sentinel-1/2, UNet-ResNet), configure LoRA PEFT ($r=2..64, \alpha=4..128$), select class-imbalanced compound loss, tune learning rate/epochs/batch size, trigger background asynchronous training runs with live dual-axis Chart.js curves (Loss vs IoU), and stream real-time monospace terminal logs.
+- **Tab 2: Model Testing & Benchmarking**: Evaluate validation test batches with in-memory weights or saved checkpoints, render $2 \times 2$ pixel-level Confusion Matrix scorecards (True Positives, False Positives, False Negatives, True Negatives), and compute full threshold sensitivity trade-off sweep curves ($0.1 \le \tau \le 0.9$).
+- **Tab 3: Single-Chip Deep Inspector**: Inspect all 9 multi-spectral layers (T1/T2 RGB, CIR, NDVI, SAR Radar Composite, Hansen GT Mask, AI Deforestation Probability Map, and Pixel Error Confusion Diff Map: Green=TP, Orange=FP, Red=FN, Slate=TN).
+- **Tab 4: Geospatial Alert Map**: Full interactive Leaflet map with CartoDB Dark Matter satellite basemap, Minimum Mapping Unit (MMU) filtering ($0.02 - 1.0\text{ ha}$), severity-colored vector polygons (CRITICAL, HIGH, MEDIUM), and GeoJSON alert download.
+- **Tab 5: EUDR Due Diligence & Regulatory Compliance**: Upload or test farm plots against legal mandates under Regulation (EU) 2023/1115 (Dec 31, 2020 cutoff, $\le 4\,\text{ha}$ point vs $> 4\,\text{ha}$ polygon, $\ge 6$ decimal precision, Annex I commodities), compute Olofsson et al. (2014) area-adjusted accuracy with 95% confidence intervals, and generate compliance audit verdicts.
+- **Tab 6: Checkpoints & Dataset Zoo**: Browse saved `.pt` weights, direct browser file downloads via `/studio/api/download/{filename}`, hot-swap active inference backbones, and generate balanced 70:30 synthetic chips.
 
 #### Launching the Studio:
 ```bash
 # Standalone high-performance web dashboard (FastAPI + Leaflet + Chart.js):
-python studio.py --port 8501
+python studio.py --port 8501 --host 0.0.0.0
 
-# Or with Streamlit (if installed):
-streamlit run studio.py
+# Open http://localhost:8501 in your browser
 ```
 
 ---
@@ -216,11 +220,11 @@ streamlit run studio.py
 
 ## Verification & Testing Suite
 
-All 68 unit and integration tests execute with a 100% pass rate:
+All 87 unit and integration tests execute with a 100% pass rate:
 ```bash
 pytest tests/ -v
 ```
 Output:
 ```
-======================= 68 passed in 17.13s ========================
+======================= 87 passed in 46.22s ========================
 ```
