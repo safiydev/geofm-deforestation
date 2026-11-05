@@ -165,31 +165,35 @@ def render_mask(mask: np.ndarray, color: Tuple[int, int, int] = (239, 68, 68), a
     return array_to_png_base64(rgba)
 
 
-def render_error_diff(ground_truth: np.ndarray, prediction_binary: np.ndarray) -> str:
+def render_error_diff(ground_truth: np.ndarray, detected_binary: Optional[np.ndarray] = None, prediction_binary: Optional[np.ndarray] = None) -> str:
     """Render pixel-level confusion difference map:
-    - True Positive  (Deforest correct):  Emerald Green #10B981 [16, 185, 129]
-    - False Positive (False alarm):       Amber Orange  #F59E0B [245, 158, 11]
-    - False Negative (Missed deforest):   Hot Crimson   #EF4444 [239, 68, 68]
-    - True Negative  (Intact forest):     Dark Obsidian #0F172A [15, 23, 42]
+    - True Positive  (Deforest detected correctly): Emerald Green #10B981 [16, 185, 129]
+    - False Positive (False alarm clearing):        Amber Orange  #F59E0B [245, 158, 11]
+    - False Negative (Missed deforestation):        Hot Crimson   #EF4444 [239, 68, 68]
+    - True Negative  (Intact forest background):    Dark Obsidian #0F172A [15, 23, 42]
     """
+    binary_map = detected_binary if detected_binary is not None else prediction_binary
+    if binary_map is None:
+        raise ValueError("Either detected_binary or prediction_binary must be provided.")
+
     if ground_truth.ndim == 3:
         ground_truth = ground_truth.squeeze()
-    if prediction_binary.ndim == 3:
-        prediction_binary = prediction_binary.squeeze()
+    if binary_map.ndim == 3:
+        binary_map = binary_map.squeeze()
 
     gt = ground_truth > 0.5
-    pred = prediction_binary > 0.5
+    det = binary_map > 0.5
     h, w = gt.shape
     rgb = np.zeros((h, w, 3), dtype=np.uint8)
 
-    # True Negative
-    rgb[~gt & ~pred] = [15, 23, 42]
-    # True Positive
-    rgb[gt & pred] = [16, 185, 129]
-    # False Positive
-    rgb[~gt & pred] = [245, 158, 11]
-    # False Negative
-    rgb[gt & ~pred] = [239, 68, 68]
+    # True Negative (Intact)
+    rgb[~gt & ~det] = [15, 23, 42]
+    # True Positive (Detected clearing)
+    rgb[gt & det] = [16, 185, 129]
+    # False Positive (False alarm)
+    rgb[~gt & det] = [245, 158, 11]
+    # False Negative (Missed clearing)
+    rgb[gt & ~det] = [239, 68, 68]
 
     return array_to_png_base64(rgb)
 
@@ -742,7 +746,7 @@ class StudioInferenceManager:
         checkpoint_dir: str = "./checkpoints",
         cache_dir: str = "./data/chips_cache",
     ) -> Dict[str, Any]:
-        """Deep inspect single chip: render 9 spectral layers, predicted vs GT, pixel diff map, and alerts."""
+        """Deep inspect single chip: render 9 spectral layers, detected change vs reference GT, pixel diff map, and alerts."""
         t_start = time.perf_counter()
 
         cached_files = sorted(glob.glob(os.path.join(cache_dir, "*.npz"))) if os.path.exists(cache_dir) else []
@@ -836,6 +840,7 @@ class StudioInferenceManager:
             "mmu_ha": mmu_ha,
             "elapsed_ms": round(elapsed_ms, 2),
             "ground_truth_pct": round(float(np.mean(gt_mask) * 100), 2),
+            "detected_pct": round(float(np.mean(pred_binary) * 100), 2),
             "predicted_pct": round(float(np.mean(pred_binary) * 100), 2),
             "chip_iou": round(chip_iou, 4),
             "chip_f1": round(chip_f1, 4),
@@ -853,6 +858,8 @@ class StudioInferenceManager:
                 "sar_composite": img_sar,
                 "ground_truth_mask": img_gt_mask,
                 "probability_heatmap": img_prob,
+                "detection_probability_heatmap": img_prob,
+                "detected_binary_mask": img_pred_mask,
                 "pred_binary_mask": img_pred_mask,
                 "error_diff_map": img_error_diff,
             },

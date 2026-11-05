@@ -8,7 +8,7 @@
 [![CI](https://github.com/safiydev/geofm-deforestation/actions/workflows/ci.yml/badge.svg)](https://github.com/safiydev/geofm-deforestation/actions)
 [![Tests](https://img.shields.io/badge/Tests-87%20passed-10B981.svg)](tests/)
 
-A production-grade, multimodal Geospatial Artificial Intelligence system engineered for near-real-time tropical deforestation early warning, Vision Transformer (ViT) change detection, Parameter-Efficient Fine-Tuning (PEFT/LoRA), and European Union Deforestation Regulation (EUDR, Regulation (EU) 2023/1115) compliance auditing.
+A production-grade, multimodal Geospatial Artificial Intelligence system engineered for **bitemporal change detection** of tropical deforestation, Vision Transformer (ViT) spatial attention, Parameter-Efficient Fine-Tuning (PEFT/LoRA), and European Union Deforestation Regulation (EUDR, Regulation (EU) 2023/1115) compliance auditing. Rather than forecasting hypothetical future events, GeoFM compares paired satellite acquisitions across two timestamps ($T_1$ baseline and $T_2$ observation) to detect verified forest canopy disturbances, logging roads, and clear-cuts as they occur.
 
 ---
 

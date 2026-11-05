@@ -72,7 +72,7 @@ class SiameseChangeDetector(nn.Module):
         self.dec2 = DecoderBlock(features[2], features[1], features[1])
         self.dec1 = DecoderBlock(features[1], features[0], features[0])
 
-        # Final binary change prediction head
+        # Final binary change detection head
         self.head = nn.Sequential(
             nn.Conv2d(features[0], features[0] // 2, kernel_size=3, padding=1, bias=False),
             nn.GroupNorm(num_groups=min(4, features[0] // 2), num_channels=features[0] // 2),

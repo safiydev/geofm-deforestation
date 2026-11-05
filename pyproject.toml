@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "geofm-deforestation"
 version = "1.0.0"
-description = "Geospatial AI for Early Deforestation Detection and EUDR Regulatory Compliance"
+description = "Geospatial AI for Bitemporal Deforestation Change Detection and EUDR Regulatory Compliance"
 readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.9"
@@ -15,6 +15,7 @@ authors = [
 keywords = [
     "remote-sensing",
     "geospatial-ai",
+    "bitemporal-change-detection",
     "deforestation-detection",
     "sentinel-2",
     "sentinel-1",

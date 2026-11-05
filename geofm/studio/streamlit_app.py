@@ -230,7 +230,7 @@ def run_streamlit_app():
         st.header("Satellite Change Detection Inference & Deforestation Polygonization")
         st.markdown(
             "Inspect raw multi-spectral Sentinel-2 bands, Normalized Difference Vegetation Index (NDVI), "
-            "Sentinel-1 SAR C-band dual polarization backscatter, and neural deforestation predictions."
+            "Sentinel-1 SAR C-band dual polarization backscatter, and neural deforestation detections."
         )
 
         col_s1, col_s2 = st.columns([1, 3])

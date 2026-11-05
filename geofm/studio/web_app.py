@@ -515,7 +515,7 @@ STUDIO_HTML = """<!DOCTYPE html>
       </div>
       <div>
         <div class="brand-title">GeoFM Web Training Studio</div>
-        <div class="brand-desc">Autonomous Deforestation Detection & EUDR Due Diligence Platform</div>
+        <div class="brand-desc">Bitemporal Satellite Change Detection & EUDR Compliance Platform</div>
       </div>
     </div>
     <div class="telemetry-strip" id="telemetryStrip">
@@ -535,7 +535,7 @@ STUDIO_HTML = """<!DOCTYPE html>
     </button>
     <button class="tab-btn" onclick="switchTab('benchmark')">
       <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
-      Model Benchmark
+      Change Benchmark
     </button>
     <button class="tab-btn" onclick="switchTab('inspector')">
       <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"></circle><line x1="22" y1="12" x2="18" y2="12"></line><line x1="6" y1="12" x2="2" y2="12"></line><line x1="12" y1="6" x2="12" y2="2"></line><line x1="12" y1="22" x2="12" y2="18"></line></svg>
@@ -567,9 +567,9 @@ STUDIO_HTML = """<!DOCTYPE html>
             <div class="form-group">
               <label>Model Architecture</label>
               <select id="trainArch">
-                <option value="siamese" selected>Siamese Change Detector (Bitemporal S-2)</option>
-                <option value="multimodal">Multimodal Early-Fusion (Sentinel-1 SAR + S-2)</option>
-                <option value="unet">UNet Baseline (ResNet-18 Backbone)</option>
+                <option value="siamese" selected>Siamese Bitemporal Change Detector (T1 Baseline vs T2 Observation)</option>
+                <option value="multimodal">Multimodal Bitemporal Change Net (Sentinel-1 SAR + Sentinel-2 Optical)</option>
+                <option value="unet">UNet Bitemporal Change Baseline (ResNet-18 Backbone)</option>
               </select>
             </div>
             <div class="checkbox-row">
@@ -589,7 +589,7 @@ STUDIO_HTML = """<!DOCTYPE html>
             <div class="form-group">
               <label>Loss Function</label>
               <select id="trainLoss">
-                <option value="compound" selected>Compound Deforestation Loss (Focal + Tversky)</option>
+                <option value="compound" selected>Compound Change Detection Loss (Focal + Tversky)</option>
                 <option value="focal_tversky">Focal Tversky Loss</option>
                 <option value="focal">Binary Focal Loss (γ = 2.0)</option>
                 <option value="bce">Standard Binary Cross Entropy</option>
@@ -676,11 +676,11 @@ STUDIO_HTML = """<!DOCTYPE html>
       <div class="grid-2">
         <div>
           <div class="card">
-            <div class="card-title">Benchmark Parameters</div>
+            <div class="card-title">Change Detection Benchmark Parameters</div>
             <div class="form-group">
               <label>Select Model Checkpoint</label>
               <select id="benchCheckpoint">
-                <option value="">Active Siamese Backbone (In-Memory)</option>
+                <option value="">Active Siamese Change Detection Backbone (In-Memory)</option>
               </select>
             </div>
             <div class="form-group">
@@ -688,7 +688,7 @@ STUDIO_HTML = """<!DOCTYPE html>
               <input type="number" id="benchSamples" class="form-control" value="16" min="4" max="100">
             </div>
             <div class="form-group">
-              <label>Classification Threshold: <strong id="benchThreshVal" style="color:var(--accent-cyan);">0.50</strong></label>
+              <label>Change Detection Threshold: <strong id="benchThreshVal" style="color:var(--accent-cyan);">0.50</strong></label>
               <input type="range" id="benchThreshold" min="0.10" max="0.90" step="0.05" value="0.50" oninput="document.getElementById('benchThreshVal').innerText = parseFloat(this.value).toFixed(2)">
             </div>
             <button class="btn btn-cyan btn-block" onclick="runBenchmark()">
@@ -698,7 +698,7 @@ STUDIO_HTML = """<!DOCTYPE html>
             <div style="margin-top: 0.75rem;">
               <button class="btn btn-secondary btn-block" onclick="runThresholdSweep()">
                 <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>
-                Compute Threshold Sweep (0.1 - 0.9)
+                Compute Detection Threshold Sweep (0.1 - 0.9)
               </button>
             </div>
           </div>
@@ -706,7 +706,7 @@ STUDIO_HTML = """<!DOCTYPE html>
 
         <div>
           <div class="card">
-            <div class="card-title">Pixel-Level Confusion Matrix Scorecard</div>
+            <div class="card-title">Bitemporal Change Confusion Scorecard</div>
             <table class="cm-table">
               <tr>
                 <td></td>
@@ -714,7 +714,7 @@ STUDIO_HTML = """<!DOCTYPE html>
                 <td style="text-align:center; font-size:0.75rem; color:var(--text-muted); font-weight:600;">ACTUAL INTACT</td>
               </tr>
               <tr>
-                <td style="font-size:0.75rem; color:var(--text-muted); font-weight:600; vertical-align:middle;">PRED DEFOREST</td>
+                <td style="font-size:0.75rem; color:var(--text-muted); font-weight:600; vertical-align:middle;">DETECTED DEFOREST</td>
                 <td class="cm-cell tp">
                   <div style="font-size:0.70rem; color:var(--text-muted);">TRUE POSITIVE</div>
                   <div class="cm-count" id="cmTP">--</div>
@@ -725,7 +725,7 @@ STUDIO_HTML = """<!DOCTYPE html>
                 </td>
               </tr>
               <tr>
-                <td style="font-size:0.75rem; color:var(--text-muted); font-weight:600; vertical-align:middle;">PRED INTACT</td>
+                <td style="font-size:0.75rem; color:var(--text-muted); font-weight:600; vertical-align:middle;">DETECTED INTACT</td>
                 <td class="cm-cell fn">
                   <div style="font-size:0.70rem; color:var(--text-muted);">FALSE NEGATIVE</div>
                   <div class="cm-count" id="cmFN">--</div>
@@ -780,10 +780,10 @@ STUDIO_HTML = """<!DOCTYPE html>
       <div class="card">
         <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:1rem;">
           <div style="display:flex; align-items:center; gap:0.75rem;">
-            <div class="card-title" style="margin-bottom:0;">Chip Inspector: <span id="inspChipTitle" style="color:var(--accent-cyan); font-family:var(--font-mono);">chip_0000</span></div>
-            <div class="tele-pill">GT: <strong id="inspGtPct" style="color:var(--accent-crimson);">--%</strong></div>
-            <div class="tele-pill">PRED: <strong id="inspPredPct" style="color:var(--accent-amber);">--%</strong></div>
-            <div class="tele-pill">IoU: <strong id="inspIoU" style="color:var(--accent-emerald);">--</strong></div>
+            <div class="card-title" style="margin-bottom:0;">Bitemporal Chip Inspector: <span id="inspChipTitle" style="color:var(--accent-cyan); font-family:var(--font-mono);">chip_0000</span></div>
+            <div class="tele-pill">REFERENCE GT: <strong id="inspGtPct" style="color:var(--accent-crimson);">--%</strong></div>
+            <div class="tele-pill">DETECTED: <strong id="inspPredPct" style="color:var(--accent-amber);">--%</strong></div>
+            <div class="tele-pill">CHANGE IoU: <strong id="inspIoU" style="color:var(--accent-emerald);">--</strong></div>
           </div>
           <div style="display:flex; align-items:center; gap:0.5rem;">
             <input type="number" id="inspChipIdx" class="form-control" style="width: 80px;" value="0" min="0">
@@ -795,7 +795,7 @@ STUDIO_HTML = """<!DOCTYPE html>
       </div>
 
       <div class="layers-grid" id="layersContainer">
-        <!-- 9 Multi-spectral and prediction layers populated dynamically -->
+        <!-- 9 Multi-spectral and detection layers populated dynamically -->
       </div>
     </div>
 
@@ -804,14 +804,14 @@ STUDIO_HTML = """<!DOCTYPE html>
       <div class="grid-2">
         <div>
           <div class="card">
-            <div class="card-title">Geospatial Simulation</div>
+            <div class="card-title">Geospatial Bitemporal Change Simulation</div>
             <div class="form-group">
-              <label>Model Engine</label>
+              <label>Change Detection Engine</label>
               <select id="mapModelType">
-                <option value="siamese" selected>Bitemporal Siamese Net</option>
-                <option value="multimodal">Sentinel-1/2 Multimodal Net</option>
-                <option value="unet">UNet Baseline</option>
-                <option value="baseline_ndvi">ΔNDVI Heuristic</option>
+                <option value="siamese" selected>Bitemporal Siamese Change Detector</option>
+                <option value="multimodal">Sentinel-1/2 Multimodal Change Net</option>
+                <option value="unet">UNet Bitemporal Change Baseline</option>
+                <option value="baseline_ndvi">ΔNDVI Spectral Differencing Heuristic</option>
               </select>
             </div>
             <div class="form-group">
@@ -823,12 +823,12 @@ STUDIO_HTML = """<!DOCTYPE html>
               <input type="range" id="mapCloud" min="0.0" max="0.50" step="0.05" value="0.15" oninput="document.getElementById('mapCloudVal').innerText = parseFloat(this.value).toFixed(2)">
             </div>
             <div class="form-group">
-              <label>Minimum Mapping Unit (MMU): <strong id="mapMmuVal" style="color:var(--accent-cyan);">0.10 ha</strong></label>
+              <label>Minimum Mapping Unit (MMU Filter): <strong id="mapMmuVal" style="color:var(--accent-cyan);">0.10 ha</strong></label>
               <input type="range" id="mapMmu" min="0.02" max="1.0" step="0.02" value="0.10" oninput="document.getElementById('mapMmuVal').innerText = parseFloat(this.value).toFixed(2) + ' ha'">
             </div>
             <button class="btn btn-emerald btn-block" onclick="runGeospatialInference()">
               <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><polygon points="1 6 1 22 8 18 16 22 23 18 23 2 16 6 8 2 1 6"></polygon></svg>
-              Run Geospatial Inference
+              Run Geospatial Detection
             </button>
             <div style="margin-top:0.65rem;">
               <button class="btn btn-secondary btn-block" onclick="exportGeoJSON()">
@@ -1263,20 +1263,20 @@ STUDIO_HTML = """<!DOCTYPE html>
         const d = await resp.json();
         document.getElementById('inspChipTitle').innerText = d.chip_id;
         document.getElementById('inspGtPct').innerText = d.ground_truth_pct + '%';
-        document.getElementById('inspPredPct').innerText = d.predicted_pct + '%';
+        document.getElementById('inspPredPct').innerText = (d.detected_pct !== undefined ? d.detected_pct : d.predicted_pct) + '%';
         document.getElementById('inspIoU').innerText = (d.chip_iou * 100).toFixed(1) + '%';
 
         const layers = [
-          { title: 'T1 S-2 True Color (RGB)', src: d.layers.t1_rgb },
-          { title: 'T2 S-2 Post-Clearance (RGB)', src: d.layers.t2_rgb },
-          { title: 'T1 Color Infrared (CIR)', src: d.layers.t1_cir },
-          { title: 'T2 Color Infrared (CIR)', src: d.layers.t2_cir },
-          { title: 'T1 NDVI Canopy Heatmap', src: d.layers.ndvi_t1 },
-          { title: 'T2 NDVI Canopy Heatmap', src: d.layers.ndvi_t2 },
+          { title: 'T1 S-2 Baseline Optical (RGB)', src: d.layers.t1_rgb },
+          { title: 'T2 S-2 Post-Acquisition Optical (RGB)', src: d.layers.t2_rgb },
+          { title: 'T1 Baseline Color Infrared (CIR)', src: d.layers.t1_cir },
+          { title: 'T2 Observation Color Infrared (CIR)', src: d.layers.t2_cir },
+          { title: 'T1 Baseline NDVI Canopy Index', src: d.layers.ndvi_t1 },
+          { title: 'T2 Observation NDVI Canopy Index', src: d.layers.ndvi_t2 },
           { title: 'Sentinel-1 SAR Radar Composite', src: d.layers.sar_composite },
-          { title: 'Ground Truth Hansen Mask', src: d.layers.ground_truth_mask },
-          { title: 'AI Deforestation Probability', src: d.layers.probability_heatmap },
-          { title: 'Pixel Error Confusion Map', src: d.layers.error_diff_map }
+          { title: 'Ground Truth Reference Mask (Hansen GFC)', src: d.layers.ground_truth_mask },
+          { title: 'AI Deforestation Detection Probability', src: d.layers.probability_heatmap },
+          { title: 'Bitemporal Change Confusion Diff Map', src: d.layers.error_diff_map }
         ];
 
         const container = document.getElementById('layersContainer');
