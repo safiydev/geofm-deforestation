@@ -37,9 +37,12 @@ coverage.xml
 *.cover
 *.py,cover
 
-# Model checkpoints & weights
-checkpoints/
+# Model checkpoints & weights (ignore local checkpoints except bundled demo checkpoint)
+checkpoints/*
+!checkpoints/siamese_30epochs_49iou.pt
+!checkpoints/metrics_history_30epochs.csv
 *.pt
+!checkpoints/siamese_30epochs_49iou.pt
 *.pth
 *.onnx
 
@@ -58,13 +61,18 @@ venv.bak/
 .vscode/
 *.swp
 
-# Local caches & data
-data/
+# Local caches & data (ignore local datasets except demo chips)
+data/*
+!data/chips_cache/
+data/chips_cache/*
+!data/chips_cache/gee_s2_00063.npz
 *.zip
 *.npz
+!data/chips_cache/gee_s2_00063.npz
+!demo/
+!demo/**
 *.csv
+!checkpoints/metrics_history_30epochs.csv
 
 # Impeccable live session & certificates
 .impeccable/
-
-

@@ -146,6 +146,11 @@ Load custom PyTorch checkpoints (`.pt` / `.pth`), auto-inspect architecture and 
 python model_loader.py --port 8600
 # Open http://localhost:8600 in your browser
 ```
+
+![GeoFM Model Loader & Inference Studio Output](docs/assets/model_loader_studio_demo.png)
+
+- **Bundled Hero Checkpoint**: Includes `checkpoints/siamese_30epochs_49iou.pt` (30-epoch Siamese model trained on 1,000 chips, achieving **48.85% global validation IoU** and **93.7% IoU** on benchmark Amazon parcels).
+- **Bundled Demo Chip**: Includes `demo/gee_s2_00063.npz` (bitemporal Sentinel-2 acquisition over Brazilian Amazon basin, coordinates `-7.523, -63.841`, detecting 172.82 ha deforestation in a clean, contiguous polygon).
 - **Custom Model Loading**: Upload any PyTorch `.pt` / `.pth` checkpoint or select from local `./checkpoints/`. Auto-detects architecture (`siamese`, `unet`, `multimodal`), input channels, and LoRA rank.
 - **Dataset ZIP Ingestion**: Drag-and-drop `geofm_dataset.zip` directly into the web UI; the studio auto-unpacks the chips and triggers instant evaluation.
 - **Multiple Input Formats**: Ingest pre-cached chips, upload custom bitemporal rasters (T1 + T2 in PNG/TIFF/NPZ), or generate synthetic canopy test scenes.
