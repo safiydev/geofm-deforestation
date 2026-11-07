@@ -6,7 +6,7 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![GitHub Pages](https://img.shields.io/badge/docs-GitHub%20Pages-06B6D4.svg)](https://safiydev.github.io/geofm-deforestation/)
 [![CI](https://github.com/safiydev/geofm-deforestation/actions/workflows/ci.yml/badge.svg)](https://github.com/safiydev/geofm-deforestation/actions)
-[![Tests](https://img.shields.io/badge/Tests-87%20passed-10B981.svg)](tests/)
+[![Tests](https://img.shields.io/badge/Tests-94%20passed-10B981.svg)](tests/)
 
 A production-grade, multimodal Geospatial Artificial Intelligence system engineered for **bitemporal change detection** of tropical deforestation, Vision Transformer (ViT) spatial attention, Parameter-Efficient Fine-Tuning (PEFT/LoRA), and European Union Deforestation Regulation (EUDR, Regulation (EU) 2023/1115) compliance auditing. Rather than forecasting hypothetical future events, GeoFM compares paired satellite acquisitions across two timestamps ($T_1$ baseline and $T_2$ observation) to detect verified forest canopy disturbances, logging roads, and clear-cuts as they occur.
 
@@ -124,6 +124,17 @@ python geofm/train_cli.py \
 ### 3. Launch the Production FastAPI Service
 ```bash
 uvicorn geofm.api.app:app --host 0.0.0.0 --port 8000 --reload
+```
+
+### 4. Launch the Interactive Web Studio & EUDR Suite
+```bash
+python studio.py --port 8501
+# Open http://localhost:8501 in your browser
+```
+
+### 5. Run the Automated Test Suite (94 Tests)
+```bash
+pytest tests/ -v
 ```
 
 ---

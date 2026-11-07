@@ -10,7 +10,7 @@ import os
 from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, HTTPException, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, Response
 from pydantic import BaseModel, Field
 import torch
 import numpy as np
@@ -2855,6 +2855,10 @@ def create_studio_app() -> FastAPI:
     @app.post("/studio/api/chips/generate")
     def generate_chips_endpoint(req: GenerateChipsRequest):
         return chip_mgr.generate_synthetic_chips(num_chips=req.num_chips, deforest_ratio=req.deforest_ratio)
+
+    @app.get("/favicon.ico", include_in_schema=False)
+    def favicon_endpoint():
+        return Response(content=b"", media_type="image/x-icon", status_code=204)
 
     @app.get("/studio/api/telemetry")
     def telemetry_endpoint():
