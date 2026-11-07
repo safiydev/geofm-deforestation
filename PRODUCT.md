@@ -28,7 +28,8 @@ Unlike generic computer vision frameworks or speculative risk-scoring tools that
 
 ## Operating Context
 
-- **Deployment**: Local workstation and edge execution across Windows, Linux, and macOS platforms via FastAPI and browser-based single-page application (`http://127.0.0.1:8501`).
+- **Primary Evaluation & Testing**: **Google Colab Notebooks are strongly recommended** for testing, evaluating, and training this project with dedicated cloud GPU acceleration (`notebooks/geofm_training.ipynb`).
+- **Web Studio Status**: The interactive Web Studio (`http://127.0.0.1:8501`) is solely an **experimental proof-of-concept and untested**; if anyone wants to evaluate or test this project, the Google Colab notebooks are strongly recommended.
 - **Data Ingestion**: Hybrid architecture supporting direct streaming from Google Earth Engine, custom local folder scanning, browser drag-and-drop ZIP ingest, and zero-RAM synthetic streaming.
 - **Output Formats**: Interactive Leaflet maps, Chart.js loss/IoU convergence curves, GeoJSON alert vectors, audit PDF/JSON statements, and PNG spectral overlays.
 

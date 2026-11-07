@@ -127,10 +127,15 @@ python geofm/train_cli.py \
 uvicorn geofm.api.app:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-### 4. Launch the Interactive Web Studio & EUDR Suite
+### 4. Launch the Interactive Web Studio & EUDR Suite (Proof-of-Concept)
+> [!IMPORTANT]
+> **Proof-of-Concept Notice**: The interactive Web Studio (`studio.py`) is strictly an **experimental, untested proof-of-concept**. **If anyone wants to try out, test, or evaluate this project, running the Google Colab notebooks is strongly recommended.**
+> 
+> [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/safiydev/geofm-deforestation/blob/main/notebooks/geofm_training.ipynb)
+
 ```bash
 python studio.py --port 8501
-# Open http://localhost:8501 in your browser
+# Open http://localhost:8501 in your browser (experimental PoC)
 ```
 
 ### 5. Run the Automated Test Suite (95 Tests)
@@ -139,9 +144,11 @@ pytest tests/ -v
 ```
 
 ### 6. Cloud GPU Foundation Model Training (Google Colab)
-> **Training Provenance**: Heavy planetary-scale foundation model training (5,000+ multi-spectral satellite chips) and checkpoint generation was executed on cloud GPU accelerators (NVIDIA A100 / T4) using our reproducible [Google Colab Training Notebook](notebooks/geofm_training.ipynb) with automated Earth Engine ingestion. 
+> **Primary Recommended Method**: **If you want to test, evaluate, or train this project, using the Google Colab notebook is strongly recommended.** 
 > 
-> The local Web Studio (`python studio.py --port 8501`) serves as a lightweight, edge-deployable workstation for **Bring-Your-Own-Data (BYOD)** inference, local LoRA fine-tuning, threshold benchmarking, and statutory EUDR compliance auditing.
+> Heavy planetary-scale foundation model training (5,000+ multi-spectral satellite chips) and checkpoint generation was executed on cloud GPU accelerators (NVIDIA A100 / T4) using our reproducible [Google Colab Training Notebook](notebooks/geofm_training.ipynb) with automated Earth Engine ingestion. 
+> 
+> The local Web Studio (`python studio.py --port 8501`) is solely an **experimental proof-of-concept and untested** interface for Bring-Your-Own-Data (BYOD) prototyping and EUDR compliance visualization.
 > 
 > [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/safiydev/geofm-deforestation/blob/main/notebooks/geofm_training.ipynb)
 

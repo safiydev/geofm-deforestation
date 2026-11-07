@@ -700,7 +700,7 @@ STUDIO_HTML = r"""<!DOCTYPE html>
             <span style="font-size:0.85rem; font-weight:700; color:var(--text);">Foundation Model Trained via Google Colab GPUs</span>
           </div>
           <div style="font-size:0.76rem; color:var(--text-muted); margin-top:0.3rem; line-height:1.45;">
-            Our planetary-scale foundation weights were pre-trained on cloud GPU accelerators (NVIDIA A100 / T4) using our reproducible Google Colab pipeline with automated Google Earth Engine ingestion. This local Web Studio is engineered for edge inference, rapid LoRA adaptation, and <strong>Bring-Your-Own-Data (BYOD)</strong> validation.
+            Our planetary-scale foundation weights were pre-trained on cloud GPU accelerators (NVIDIA A100 / T4) using our reproducible Google Colab pipeline with automated Google Earth Engine ingestion. This local Web Studio is an <strong>experimental, untested proof-of-concept</strong>. <strong>If you want to test or evaluate this project, running the Google Colab notebook is strongly recommended.</strong>
           </div>
         </div>
         <a href="https://colab.research.google.com/github/safiydev/geofm-deforestation/blob/main/notebooks/geofm_training.ipynb" target="_blank" rel="noopener noreferrer" style="display:inline-flex; align-items:center; gap:0.4rem; padding:8px 14px; background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.2); border-radius:6px; color:#fff; text-decoration:none; font-size:0.75rem; font-weight:600; white-space:nowrap; transition:all 0.15s ease;">
