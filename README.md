@@ -6,8 +6,9 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![GitHub Pages](https://img.shields.io/badge/docs-GitHub%20Pages-06B6D4.svg)](https://safiydev.github.io/geofm-deforestation/)
 [![CI](https://github.com/safiydev/geofm-deforestation/actions/workflows/ci.yml/badge.svg)](https://github.com/safiydev/geofm-deforestation/actions)
-[![Tests](https://img.shields.io/badge/Tests-95%20passed-10B981.svg)](tests/)
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/safiydev/geofm-deforestation/blob/main/notebooks/geofm_training.ipynb)
+[![Tests](https://img.shields.io/badge/Tests-104%20passed-10B981.svg)](tests/)
+[![Open Training In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/safiydev/geofm-deforestation/blob/main/notebooks/geofm_training.ipynb)
+[![Open Dataset Builder In Colab](https://img.shields.io/badge/Colab-Dataset%20Builder%20ZIP-F9AB00?logo=googlecolab&logoColor=white)](https://colab.research.google.com/github/safiydev/geofm-deforestation/blob/main/notebooks/geofm_dataset_builder.ipynb)
 
 A production-grade, multimodal Geospatial Artificial Intelligence system engineered for **bitemporal change detection** of tropical deforestation, Vision Transformer (ViT) spatial attention, Parameter-Efficient Fine-Tuning (PEFT/LoRA), and European Union Deforestation Regulation (EUDR, Regulation (EU) 2023/1115) compliance auditing. Rather than forecasting hypothetical future events, GeoFM compares paired satellite acquisitions across two timestamps ($T_1$ baseline and $T_2$ observation) to detect verified forest canopy disturbances, logging roads, and clear-cuts as they occur.
 
