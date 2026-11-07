@@ -76,3 +76,4 @@ data/chips_cache/*
 
 # Impeccable live session & certificates
 .impeccable/
+DESIGN.md
