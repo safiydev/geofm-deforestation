@@ -138,7 +138,20 @@ python studio.py --port 8501
 # Open http://localhost:8501 in your browser (experimental PoC)
 ```
 
-### 5. Run the Automated Test Suite (95 Tests)
+### 5. Launch the Standalone Model Loader & Inference Studio
+Load custom PyTorch checkpoints (`.pt` / `.pth`), auto-inspect architecture and LoRA PEFT adapters, test with pre-cached chips or custom image pairs, and view real-time heatmaps with interactive thresholding:
+
+```bash
+python model_loader.py --port 8600
+# Open http://localhost:8600 in your browser
+```
+- **Custom Model Loading**: Upload any PyTorch `.pt` / `.pth` checkpoint or select from local `./checkpoints/`. Auto-detects architecture (`siamese`, `unet`, `multimodal`), input channels, and LoRA rank.
+- **Multiple Input Sources**: Ingest pre-cached satellite chips, upload custom bitemporal rasters (T1 + T2 in PNG/TIFF/NPZ), or generate synthetic canopy test scenes.
+- **Live Output Visualizer**: Inspect T1 baseline, T2 observation, spectral delta shift, continuous probability heatmaps, and thresholded binary masks.
+- **Dynamic Decision Slider**: Adjust detection threshold (0.05 to 0.95) with instant (<5ms) re-polygonization and deforestation area recalculation.
+- **GIS Export**: 1-click download of polygonized Deforestation Alert GeoJSONs.
+
+### 6. Run the Automated Test Suite (104 Tests)
 ```bash
 pytest tests/ -v
 ```

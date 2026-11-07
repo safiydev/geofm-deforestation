@@ -40,6 +40,7 @@ Unlike generic computer vision frameworks or speculative risk-scoring tools that
 - **Interactive Satellite Chip & Mask Viewer**: Dynamic opacity slider (0% to 100%) superimposing translucent red deforestation masks onto true-color $T_2$ optical imagery.
 - **12-Layer Spectral Gallery**: True Color RGB ($T_1$, $T_2$), Color Infrared CIR ($T_1$, $T_2$), NDVI vegetation indices ($T_1$, $T_2$), Sentinel-1 SAR composite, Hansen GFC mask, AI detection probability heatmap, binary change mask, and confusion difference map.
 - **Model Checkpoint Management**: Storage zoo dropdown and manual text/browser file loader for any local `.pt` or `.pth` weights file.
+- **Standalone Model Loader & Inference Studio**: Lightweight local web application (`python model_loader.py --port 8600`) to load custom PyTorch checkpoints (`.pt`), auto-inspect LoRA adapters/weights, test on pre-cached chips or custom image pairs, and view real-time probability heatmaps with instant threshold sliders.
 - **Automated Geometry Extraction**: Douglas-Peucker polygon simplification with Minimum Mapping Unit (MMU) area thresholds.
 - **EUDR Regulatory Suite**: Automated Due Diligence Statement validation, cutoff date checking, risk scoring, and Olofsson area-adjusted verification.
 
