@@ -13,6 +13,8 @@ Usage:
 
 import argparse
 import base64
+import zipfile
+import shutil
 import glob
 import io
 import json
@@ -148,7 +150,7 @@ class ModelLoaderEngine:
         cpath = Path(cache_dir)
         if not cpath.exists():
             return []
-        chips = sorted(list(cpath.glob("*.npz")))
+        chips = sorted(list(cpath.glob("*.npz")), key=lambda p: p.stat().st_mtime, reverse=True)
         samples = []
         for c in chips[:60]:  # Limit top 60 for fast responsiveness
             try:
@@ -590,6 +592,51 @@ async def upload_custom_checkpoint(
         raise HTTPException(status_code=400, detail=f"Failed to load uploaded checkpoint: {str(e)}")
 
 
+
+@app.post("/api/dataset/upload-zip")
+async def upload_dataset_zip(file: UploadFile = File(...)):
+    """Upload a packaged dataset ZIP (e.g. from geofm_dataset_builder.ipynb) and ingest chips."""
+    fname = file.filename.lower()
+    if not fname.endswith(".zip"):
+        raise HTTPException(status_code=400, detail="Only .zip archives are supported.")
+    
+    try:
+        content = await file.read()
+        target_dir = Path("data/chips_cache")
+        target_dir.mkdir(parents=True, exist_ok=True)
+        
+        extracted = []
+        with zipfile.ZipFile(io.BytesIO(content)) as zf:
+            for member in zf.infolist():
+                norm = os.path.normpath(member.filename)
+                if norm.startswith("..") or os.path.isabs(norm):
+                    continue
+                if member.is_dir():
+                    continue
+                base_name = Path(norm).name
+                if base_name.endswith(".npz"):
+                    dest = target_dir / base_name
+                    with zf.open(member) as src, open(dest, "wb") as dst:
+                        shutil.copyfileobj(src, dst)
+                    extracted.append(base_name)
+                    
+        if not extracted:
+            raise HTTPException(status_code=400, detail="No valid .npz satellite chips found inside the uploaded ZIP archive.")
+            
+        samples = engine.list_cached_samples()
+        return {
+            "success": True,
+            "filename": file.filename,
+            "unpacked_count": len(extracted),
+            "samples": samples,
+            "first_sample": samples[0]["filename"] if samples else None,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to process dataset ZIP: {str(e)}")
+
+
 @app.post("/api/predict/sample")
 async def predict_cached_sample(
     filename: str = Form(...),
@@ -850,14 +897,30 @@ HTML_PAGE = """<!DOCTYPE html>
                     </div>
 
                     <!-- Input Data Modes -->
-                    <div class="flex border-b border-gray-800 text-xs">
-                        <button id="tabPresetBtn" onclick="switchDataTab('preset')" class="px-4 py-2 border-b-2 border-emerald-500 font-medium text-emerald-400">Preset Chip Cache</button>
-                        <button id="tabCustomUploadBtn" onclick="switchDataTab('custom')" class="px-4 py-2 text-gray-400 hover:text-white">Upload Images (T1 + T2)</button>
-                        <button id="tabSynthBtn" onclick="switchDataTab('synth')" class="px-4 py-2 text-gray-400 hover:text-white">Synthetic Test Case</button>
+                    <div class="flex border-b border-gray-800 text-xs overflow-x-auto">
+                        <button id="tabZipBtn" onclick="switchDataTab('zip')" class="px-4 py-2 border-b-2 border-emerald-500 font-medium text-emerald-400 whitespace-nowrap flex items-center gap-1.5"><i class="fa-solid fa-file-zipper"></i> Upload Dataset ZIP</button>
+                        <button id="tabPresetBtn" onclick="switchDataTab('preset')" class="px-4 py-2 text-gray-400 hover:text-white whitespace-nowrap">Chip Cache</button>
+                        <button id="tabCustomUploadBtn" onclick="switchDataTab('custom')" class="px-4 py-2 text-gray-400 hover:text-white whitespace-nowrap">Image Pair (T1+T2)</button>
+                        <button id="tabSynthBtn" onclick="switchDataTab('synth')" class="px-4 py-2 text-gray-400 hover:text-white whitespace-nowrap">Synthetic Test</button>
                     </div>
 
-                    <!-- Mode A: Preset Cached Chips -->
-                    <div id="dataPresetPane" class="space-y-3">
+                    <!-- Mode A: Upload Dataset ZIP (Colab Packager Output) -->
+                    <div id="dataZipPane" class="space-y-3">
+                        <div class="border-2 border-dashed border-gray-700 hover:border-emerald-500 rounded-lg p-5 text-center transition cursor-pointer" onclick="document.getElementById('zipFileInput').click()">
+                            <i class="fa-solid fa-file-zipper text-3xl text-emerald-400 mb-2"></i>
+                            <p class="text-xs text-gray-200 font-medium">Click to select or drag <span class="font-mono text-emerald-400 font-bold">geofm_dataset.zip</span></p>
+                            <p class="text-[11px] text-gray-400 mt-1">Packaged bitemporal Sentinel-2 & Hansen GFC chips from Google Colab</p>
+                            <p id="zipFileNameDisplay" class="text-xs text-emerald-300 mt-2 font-mono"></p>
+                            <input type="file" id="zipFileInput" class="hidden" accept=".zip" onchange="onZipFileSelected(this)">
+                        </div>
+
+                        <button id="btnUploadZip" onclick="uploadDatasetZip()" class="w-full py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-medium text-sm transition flex items-center justify-center gap-2 shadow-lg shadow-emerald-900/30">
+                            <i class="fa-solid fa-box-open"></i> Ingest & Unpack Dataset ZIP
+                        </button>
+                    </div>
+
+                    <!-- Mode B: Preset Cached Chips -->
+                    <div id="dataPresetPane" class="space-y-3 hidden">
                         <div>
                             <label class="block text-xs font-medium text-gray-400 mb-1">Select from Amazon / GEE Cached Chips</label>
                             <select id="sampleSelect" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-emerald-500">
@@ -1182,31 +1245,80 @@ HTML_PAGE = """<!DOCTYPE html>
         }
 
         function switchDataTab(tab) {
+            const zipPane = document.getElementById('dataZipPane');
             const presetPane = document.getElementById('dataPresetPane');
             const customPane = document.getElementById('dataCustomPane');
             const synthPane = document.getElementById('dataSynthPane');
 
+            const zipBtn = document.getElementById('tabZipBtn');
             const presetBtn = document.getElementById('tabPresetBtn');
             const customBtn = document.getElementById('tabCustomUploadBtn');
             const synthBtn = document.getElementById('tabSynthBtn');
 
+            zipPane.classList.add('hidden');
             presetPane.classList.add('hidden');
             customPane.classList.add('hidden');
             synthPane.classList.add('hidden');
 
-            presetBtn.className = "px-4 py-2 text-gray-400 hover:text-white";
-            customBtn.className = "px-4 py-2 text-gray-400 hover:text-white";
-            synthBtn.className = "px-4 py-2 text-gray-400 hover:text-white";
+            zipBtn.className = "px-4 py-2 text-gray-400 hover:text-white whitespace-nowrap flex items-center gap-1.5";
+            presetBtn.className = "px-4 py-2 text-gray-400 hover:text-white whitespace-nowrap";
+            customBtn.className = "px-4 py-2 text-gray-400 hover:text-white whitespace-nowrap";
+            synthBtn.className = "px-4 py-2 text-gray-400 hover:text-white whitespace-nowrap";
 
-            if (tab === 'preset') {
+            if (tab === 'zip') {
+                zipPane.classList.remove('hidden');
+                zipBtn.className = "px-4 py-2 border-b-2 border-emerald-500 font-medium text-emerald-400 whitespace-nowrap flex items-center gap-1.5";
+            } else if (tab === 'preset') {
                 presetPane.classList.remove('hidden');
-                presetBtn.className = "px-4 py-2 border-b-2 border-emerald-500 font-medium text-emerald-400";
+                presetBtn.className = "px-4 py-2 border-b-2 border-emerald-500 font-medium text-emerald-400 whitespace-nowrap";
             } else if (tab === 'custom') {
                 customPane.classList.remove('hidden');
-                customBtn.className = "px-4 py-2 border-b-2 border-emerald-500 font-medium text-emerald-400";
+                customBtn.className = "px-4 py-2 border-b-2 border-emerald-500 font-medium text-emerald-400 whitespace-nowrap";
             } else {
                 synthPane.classList.remove('hidden');
-                synthBtn.className = "px-4 py-2 border-b-2 border-emerald-500 font-medium text-emerald-400";
+                synthBtn.className = "px-4 py-2 border-b-2 border-emerald-500 font-medium text-emerald-400 whitespace-nowrap";
+            }
+        }
+
+        function onZipFileSelected(input) {
+            if (input.files && input.files[0]) {
+                const f = input.files[0];
+                document.getElementById('zipFileNameDisplay').innerText = `${f.name} (${(f.size / (1024*1024)).toFixed(2)} MB)`;
+            }
+        }
+
+        async function uploadDatasetZip() {
+            const input = document.getElementById('zipFileInput');
+            if (!input.files || !input.files[0]) return alert("Please select a geofm_dataset.zip archive to ingest.");
+
+            const btn = document.getElementById('btnUploadZip');
+            const origHtml = btn.innerHTML;
+            btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Unpacking & Ingesting Chips...';
+            btn.disabled = true;
+
+            const formData = new FormData();
+            formData.append('file', input.files[0]);
+
+            try {
+                const res = await fetch('/api/dataset/upload-zip', { method: 'POST', body: formData });
+                const data = await res.json();
+                if (data.success) {
+                    await loadSamplesDropdown();
+                    alert(`✓ Successfully unpacked and ingested ${data.unpacked_count} bitemporal satellite chips into the local studio!`);
+                    // Automatically run inference on the first unpacked chip
+                    if (data.first_sample) {
+                        document.getElementById('sampleSelect').value = data.first_sample;
+                        switchDataTab('preset');
+                        await runSampleInference();
+                    }
+                } else {
+                    alert(`Upload failed: ${data.detail}`);
+                }
+            } catch (err) {
+                alert(`Error: ${err.message}`);
+            } finally {
+                btn.innerHTML = origHtml;
+                btn.disabled = false;
             }
         }
 

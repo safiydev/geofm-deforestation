@@ -179,3 +179,38 @@ def test_upload_custom_checkpoint(client):
     assert data["success"] is True
     assert data["model_info"]["model_type"] == "siamese"
     assert data["model_info"]["metadata"]["epoch"] == 99
+
+
+def test_upload_dataset_zip(client):
+    import zipfile
+    
+    # Create in-memory zip with 2 dummy npz chips
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, 'w') as zf:
+        c1 = io.BytesIO()
+        np.savez(c1, sample_id="zip_01", t1_optical=np.ones((4, 32, 32), dtype=np.float32), t2_optical=np.ones((4, 32, 32), dtype=np.float32)*0.8, lon=-62.1, lat=-8.1, deforested_pct=8.5)
+        zf.writestr("chip_zip_test_01.npz", c1.getvalue())
+
+        c2 = io.BytesIO()
+        np.savez(c2, sample_id="zip_02", t1_optical=np.ones((4, 32, 32), dtype=np.float32), t2_optical=np.ones((4, 32, 32), dtype=np.float32)*0.2, lon=-62.2, lat=-8.2, deforested_pct=15.0)
+        zf.writestr("subfolder/chip_zip_test_02.npz", c2.getvalue())
+
+    zip_buf.seek(0)
+    response = client.post(
+        "/api/dataset/upload-zip",
+        files={"file": ("geofm_test_dataset.zip", zip_buf, "application/zip")},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["success"] is True
+    assert data["unpacked_count"] == 2
+    assert "chip_zip_test_01.npz" in [s["filename"] for s in data["samples"]]
+
+    # Cleanup unpacked test chips
+    for name in ["chip_zip_test_01.npz", "chip_zip_test_02.npz"]:
+        p = Path("data/chips_cache") / name
+        if p.exists():
+            try:
+                p.unlink()
+            except Exception:
+                pass

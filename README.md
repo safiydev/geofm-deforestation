@@ -6,7 +6,7 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![GitHub Pages](https://img.shields.io/badge/docs-GitHub%20Pages-06B6D4.svg)](https://safiydev.github.io/geofm-deforestation/)
 [![CI](https://github.com/safiydev/geofm-deforestation/actions/workflows/ci.yml/badge.svg)](https://github.com/safiydev/geofm-deforestation/actions)
-[![Tests](https://img.shields.io/badge/Tests-104%20passed-10B981.svg)](tests/)
+[![Tests](https://img.shields.io/badge/Tests-105%20passed-10B981.svg)](tests/)
 [![Open Training In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/safiydev/geofm-deforestation/blob/main/notebooks/geofm_training.ipynb)
 [![Open Dataset Builder In Colab](https://img.shields.io/badge/Colab-Dataset%20Builder%20ZIP-F9AB00?logo=googlecolab&logoColor=white)](https://colab.research.google.com/github/safiydev/geofm-deforestation/blob/main/notebooks/geofm_dataset_builder.ipynb)
 
@@ -147,12 +147,13 @@ python model_loader.py --port 8600
 # Open http://localhost:8600 in your browser
 ```
 - **Custom Model Loading**: Upload any PyTorch `.pt` / `.pth` checkpoint or select from local `./checkpoints/`. Auto-detects architecture (`siamese`, `unet`, `multimodal`), input channels, and LoRA rank.
-- **Multiple Input Sources**: Ingest pre-cached satellite chips, upload custom bitemporal rasters (T1 + T2 in PNG/TIFF/NPZ), or generate synthetic canopy test scenes.
+- **Dataset ZIP Ingestion**: Drag-and-drop `geofm_dataset.zip` directly into the web UI; the studio auto-unpacks the chips and triggers instant evaluation.
+- **Multiple Input Formats**: Ingest pre-cached chips, upload custom bitemporal rasters (T1 + T2 in PNG/TIFF/NPZ), or generate synthetic canopy test scenes.
 - **Live Output Visualizer**: Inspect T1 baseline, T2 observation, spectral delta shift, continuous probability heatmaps, and thresholded binary masks.
 - **Dynamic Decision Slider**: Adjust detection threshold (0.05 to 0.95) with instant (<5ms) re-polygonization and deforestation area recalculation.
 - **GIS Export**: 1-click download of polygonized Deforestation Alert GeoJSONs.
 
-### 6. Run the Automated Test Suite (104 Tests)
+### 6. Run the Automated Test Suite (105 Tests)
 ```bash
 pytest tests/ -v
 ```
