@@ -7,6 +7,7 @@
 [![GitHub Pages](https://img.shields.io/badge/docs-GitHub%20Pages-06B6D4.svg)](https://safiydev.github.io/geofm-deforestation/)
 [![CI](https://github.com/safiydev/geofm-deforestation/actions/workflows/ci.yml/badge.svg)](https://github.com/safiydev/geofm-deforestation/actions)
 [![Tests](https://img.shields.io/badge/Tests-95%20passed-10B981.svg)](tests/)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/safiydev/geofm-deforestation/blob/main/notebooks/geofm_training.ipynb)
 
 A production-grade, multimodal Geospatial Artificial Intelligence system engineered for **bitemporal change detection** of tropical deforestation, Vision Transformer (ViT) spatial attention, Parameter-Efficient Fine-Tuning (PEFT/LoRA), and European Union Deforestation Regulation (EUDR, Regulation (EU) 2023/1115) compliance auditing. Rather than forecasting hypothetical future events, GeoFM compares paired satellite acquisitions across two timestamps ($T_1$ baseline and $T_2$ observation) to detect verified forest canopy disturbances, logging roads, and clear-cuts as they occur.
 
@@ -136,6 +137,13 @@ python studio.py --port 8501
 ```bash
 pytest tests/ -v
 ```
+
+### 6. Cloud GPU Foundation Model Training (Google Colab)
+> **Training Provenance**: Heavy planetary-scale foundation model training (5,000+ multi-spectral satellite chips) and checkpoint generation was executed on cloud GPU accelerators (NVIDIA A100 / T4) using our reproducible [Google Colab Training Notebook](notebooks/geofm_training.ipynb) with automated Earth Engine ingestion. 
+> 
+> The local Web Studio (`python studio.py --port 8501`) serves as a lightweight, edge-deployable workstation for **Bring-Your-Own-Data (BYOD)** inference, local LoRA fine-tuning, threshold benchmarking, and statutory EUDR compliance auditing.
+> 
+> [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/safiydev/geofm-deforestation/blob/main/notebooks/geofm_training.ipynb)
 
 ---
 

@@ -681,6 +681,10 @@ STUDIO_HTML = r"""<!DOCTYPE html>
       <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="9" ry="3"></ellipse><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path></svg>
       Checkpoints & Zoo
     </button>
+    <a href="https://colab.research.google.com/github/safiydev/geofm-deforestation/blob/main/notebooks/geofm_training.ipynb" target="_blank" rel="noopener noreferrer" class="tab-btn" style="text-decoration:none; color:var(--accent-cyan); margin-left:auto; display:inline-flex; align-items:center; gap:0.4rem;">
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" style="width:14px; height:14px;"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>
+      Open Colab Pipeline ↗
+    </a>
   </nav>
 
   <!-- Main Content Areas -->
@@ -688,6 +692,21 @@ STUDIO_HTML = r"""<!DOCTYPE html>
 
     <!-- TAB 1: AI TRAINING STUDIO -->
     <div id="tab-training" class="tab-content active">
+      <!-- Colab Foundation Training Callout Banner -->
+      <div style="background:linear-gradient(90deg, rgba(6,182,212,0.12), rgba(16,185,129,0.08)); border:1px solid rgba(6,182,212,0.3); border-radius:8px; padding:0.85rem 1.15rem; margin-bottom:1.25rem; display:flex; align-items:center; justify-content:space-between; gap:1.25rem; box-shadow:0 4px 16px rgba(0,0,0,0.2);">
+        <div>
+          <div style="display:flex; align-items:center; gap:0.5rem;">
+            <span style="font-size:0.72rem; font-weight:800; background:rgba(6,182,212,0.2); color:var(--accent-cyan); padding:2px 7px; border-radius:4px; text-transform:uppercase; letter-spacing:0.05em;">Cloud Training Architecture</span>
+            <span style="font-size:0.85rem; font-weight:700; color:var(--text);">Foundation Model Trained via Google Colab GPUs</span>
+          </div>
+          <div style="font-size:0.76rem; color:var(--text-muted); margin-top:0.3rem; line-height:1.45;">
+            Our planetary-scale foundation weights were pre-trained on cloud GPU accelerators (NVIDIA A100 / T4) using our reproducible Google Colab pipeline with automated Google Earth Engine ingestion. This local Web Studio is engineered for edge inference, rapid LoRA adaptation, and <strong>Bring-Your-Own-Data (BYOD)</strong> validation.
+          </div>
+        </div>
+        <a href="https://colab.research.google.com/github/safiydev/geofm-deforestation/blob/main/notebooks/geofm_training.ipynb" target="_blank" rel="noopener noreferrer" style="display:inline-flex; align-items:center; gap:0.4rem; padding:8px 14px; background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.2); border-radius:6px; color:#fff; text-decoration:none; font-size:0.75rem; font-weight:600; white-space:nowrap; transition:all 0.15s ease;">
+          <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab" style="height:19px;">
+        </a>
+      </div>
       <div class="grid-2">
         <div>
           <div class="card">
