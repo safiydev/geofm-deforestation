@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 import json
 import os
 from typing import Any, Dict, List, Optional
-from fastapi import FastAPI, HTTPException, File, UploadFile
+from fastapi import FastAPI, HTTPException, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, Response
 from pydantic import BaseModel, Field
@@ -43,7 +43,7 @@ class TrainRequest(BaseModel):
     epochs: int = Field(default=20)
     batch_size: int = Field(default=16)
     num_samples: int = Field(default=200)
-    dataset_source: str = Field(default="gee")
+    dataset_source: str = Field(default="cached", description="cached (BYOD), real, or synthetic")
     dataset_scale: str = Field(default="continental")
     gee_project_id: Optional[str] = Field(default=None)
     chip_size: int = Field(default=256)
@@ -703,19 +703,18 @@ STUDIO_HTML = r"""<!DOCTYPE html>
             <div class="form-group">
               <label>Dataset Source (DATASET_SOURCE)</label>
               <select id="trainDatasetSource">
-                <option value="gee" selected>Google Earth Engine + Hansen GFC (1000+ chips)</option>
-                <option value="real">Real Sentinel-2 (OSCD100 Benchmark)</option>
-                <option value="cached">Cached Local Directory</option>
-                <option value="synthetic">Synthetic Multi-Spectral (Zero-RAM Streaming)</option>
+                <option value="cached" selected>Bring Your Own Data: Local Cache & Custom Uploads</option>
+                <option value="real">Real Satellite Benchmark (OSCD100 Sentinel-2 Bitemporal)</option>
+                <option value="synthetic">Offline Synthetic Multi-Spectral (Zero-RAM Streaming)</option>
               </select>
             </div>
             <div class="grid-2-equal">
               <div class="form-group">
                 <label>Dataset Scale (DATASET_SCALE)</label>
                 <select id="trainDatasetScale">
-                  <option value="continental" selected>Continental Scale (5,000 chips)</option>
+                  <option value="standard" selected>Standard (200 chips)</option>
                   <option value="high_fidelity">High-Fidelity (1,000 chips)</option>
-                  <option value="standard">Standard (200 chips)</option>
+                  <option value="continental">Continental Scale (5,000 chips)</option>
                   <option value="quick">Quick Test (32 chips)</option>
                 </select>
               </div>
@@ -729,8 +728,8 @@ STUDIO_HTML = r"""<!DOCTYPE html>
               </div>
             </div>
             <div class="form-group">
-              <label>Google Earth Engine Project ID (GEE_PROJECT_ID)</label>
-              <input type="text" id="trainGeeProjectId" class="form-control" value="" placeholder="e.g. your-gee-project-id">
+              <label>Active Dataset Directory (DATA_DIR)</label>
+              <input type="text" id="trainDataDir" class="form-control" value="./data/chips_cache" placeholder="e.g. ./data/chips_cache or /path/to/my_data">
             </div>
 
             <!-- Group 2: Model Architecture & LoRA PEFT -->
@@ -1225,34 +1224,29 @@ STUDIO_HTML = r"""<!DOCTYPE html>
     <!-- TAB 4: DATASET & INPUT LOADER -->
     <div id="tab-input-loader" class="tab-content">
       <div class="config-grid-4">
-        <!-- Ingestion Source 1: Google Earth Engine -->
+        <!-- Ingestion Source 1: Bring Your Own Data (Paired Imagery Upload) -->
         <div class="card">
-          <div class="card-title">1. Earth Engine + Hansen GFC</div>
+          <div class="card-title">1. Bring Your Own Satellite Scenes</div>
+          <p style="font-size:0.72rem; color:var(--text-muted); margin-bottom:0.75rem; line-height:1.4;">
+            Upload pre/post satellite imagery (.tif, .png, .jpg) or raster chips to ingest directly into your local training cache.
+          </p>
           <div class="form-group">
-            <label>GEE Project ID (GEE_PROJECT_ID)</label>
-            <input type="text" id="loaderGeeProjectId" class="form-control" value="" placeholder="e.g. your-gee-project-id">
+            <label>Pre-Disturbance Scene (T1 Baseline)</label>
+            <input type="file" id="byodT1File" class="form-control" accept=".tif,.tiff,.png,.jpg,.jpeg">
           </div>
           <div class="form-group">
-            <label>Target Chip Volume</label>
-            <select id="loaderGeeVolume" class="form-control">
-              <option value="200" selected>Standard (200 chips)</option>
-              <option value="1000">High-Fidelity (1,000 chips)</option>
-              <option value="5000">Continental Scale (5,000 chips)</option>
-              <option value="32">Quick Test (32 chips)</option>
-            </select>
+            <label>Post-Disturbance Scene (T2 Observation)</label>
+            <input type="file" id="byodT2File" class="form-control" accept=".tif,.tiff,.png,.jpg,.jpeg">
           </div>
           <div class="form-group">
-            <label>Chip Pixel Size</label>
-            <select id="loaderGeeChipSize" class="form-control">
-              <option value="256" selected>256 x 256 px (10m Sentinel-2)</option>
-              <option value="128">128 x 128 px</option>
-            </select>
+            <label>Ground Truth Mask (Optional)</label>
+            <input type="file" id="byodMaskFile" class="form-control" accept=".tif,.tiff,.png,.jpg,.jpeg">
           </div>
-          <button class="btn btn-cyan btn-block" onclick="fetchChipsFromGEE()">
-            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><polygon points="12 2 2 7 12 12 22 7 12 2"></polygon><polyline points="2 17 12 22 22 17"></polyline><polyline points="2 12 12 17 22 12"></polyline></svg>
-            Fetch & Cache from GEE
+          <button class="btn btn-cyan btn-block" onclick="uploadBYODScenes()">
+            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
+            Ingest Scene Pair into Cache
           </button>
-          <div id="loaderGeeStatus" style="font-size:0.72rem; margin-top:0.5rem; color:var(--text-muted); font-family:var(--font-mono);"></div>
+          <div id="byodUploadStatus" style="font-size:0.72rem; margin-top:0.5rem; color:var(--text-muted); font-family:var(--font-mono); word-break:break-all;"></div>
         </div>
 
         <!-- Ingestion Source 2: Custom Local Folder Scanner -->
@@ -1686,9 +1680,9 @@ STUDIO_HTML = r"""<!DOCTYPE html>
     // Training Actions (All 16 Training Configuration Options)
     async function startTraining() {
       const payload = {
-        dataset_source: document.getElementById('trainDatasetSource') ? document.getElementById('trainDatasetSource').value : 'gee',
-        dataset_scale: document.getElementById('trainDatasetScale') ? document.getElementById('trainDatasetScale').value : 'continental',
-        gee_project_id: document.getElementById('trainGeeProjectId') ? document.getElementById('trainGeeProjectId').value : '',
+        dataset_source: document.getElementById('trainDatasetSource') ? document.getElementById('trainDatasetSource').value : 'cached',
+        dataset_scale: document.getElementById('trainDatasetScale') ? document.getElementById('trainDatasetScale').value : 'standard',
+        cache_dir: document.getElementById('trainDataDir') ? document.getElementById('trainDataDir').value : './data/chips_cache',
         chip_size: parseInt(document.getElementById('trainChipSize') ? document.getElementById('trainChipSize').value : 256),
         architecture: document.getElementById('trainArch').value,
         use_lora: document.getElementById('trainUseLora').checked,
@@ -2423,6 +2417,43 @@ STUDIO_HTML = r"""<!DOCTYPE html>
 
     // =========================================================================
     // Tab 4: Dataset & Input Loader JavaScript
+    async function uploadBYODScenes() {
+      const t1Input = document.getElementById('byodT1File');
+      const t2Input = document.getElementById('byodT2File');
+      const maskInput = document.getElementById('byodMaskFile');
+      const statusBox = document.getElementById('byodUploadStatus');
+
+      if (!t1Input.files || t1Input.files.length === 0 || !t2Input.files || t2Input.files.length === 0) {
+        if (statusBox) statusBox.innerHTML = '<span style="color:var(--accent-coral);">Please select both T1 (pre) and T2 (post) image files.</span>';
+        return;
+      }
+
+      const formData = new FormData();
+      formData.append('t1', t1Input.files[0]);
+      formData.append('t2', t2Input.files[0]);
+      if (maskInput.files && maskInput.files.length > 0) {
+        formData.append('mask', maskInput.files[0]);
+      }
+
+      if (statusBox) statusBox.innerHTML = '<span style="color:var(--accent-cyan);">Ingesting BYOD satellite pair into cache...</span>';
+
+      try {
+        const resp = await fetch('/studio/api/dataset/upload-pair', {
+          method: 'POST',
+          body: formData,
+        });
+        const data = await resp.json();
+        if (data.status === 'success') {
+          if (statusBox) statusBox.innerHTML = `<span style="color:var(--accent-emerald);">✓ Ingested: ${data.filename} (${data.dimensions}, ${data.channels} bands). Total chips: ${data.total_chips}</span>`;
+          refreshDatasetTable();
+        } else {
+          if (statusBox) statusBox.innerHTML = `<span style="color:var(--accent-coral);">Error: ${data.detail || data.message || 'Ingestion failed'}</span>`;
+        }
+      } catch (err) {
+        if (statusBox) statusBox.innerHTML = `<span style="color:var(--accent-coral);">Upload error: ${err.message}</span>`;
+      }
+    }
+
     // =========================================================================
     async function fetchChipsFromGEE() {
       const projId = document.getElementById('loaderGeeProjectId') ? document.getElementById('loaderGeeProjectId').value.trim() : '';
@@ -2833,6 +2864,23 @@ def create_studio_app() -> FastAPI:
     @app.post("/studio/api/dataset/set-folder")
     def dataset_set_folder_endpoint(req: SetFolderRequest):
         return chip_mgr.set_cache_dir(req.folder_path)
+
+    @app.post("/studio/api/dataset/upload-pair")
+    async def dataset_upload_pair_endpoint(
+        t1: UploadFile = File(...),
+        t2: UploadFile = File(...),
+        mask: Optional[UploadFile] = File(None),
+        chip_id: Optional[str] = Form(None),
+    ):
+        t1_bytes = await t1.read()
+        t2_bytes = await t2.read()
+        mask_bytes = await mask.read() if mask is not None else None
+        return chip_mgr.ingest_paired_chip(
+            t1_bytes=t1_bytes,
+            t2_bytes=t2_bytes,
+            mask_bytes=mask_bytes,
+            chip_name=chip_id or os.path.splitext(t1.filename or "byod_chip")[0],
+        )
 
     @app.post("/studio/api/dataset/upload-zip")
     async def dataset_upload_zip_endpoint(file: UploadFile = File(...)):

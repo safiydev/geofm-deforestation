@@ -372,7 +372,7 @@ class StudioTrainingManager:
         epochs: int = 20,
         batch_size: int = 16,
         num_samples: int = 200,
-        dataset_source: str = "auto",
+        dataset_source: str = "cached",
         dataset_scale: str = "standard",
         gee_project_id: Optional[str] = None,
         chip_size: int = 256,
@@ -456,7 +456,7 @@ class StudioTrainingManager:
         epochs: int = 20,
         batch_size: int = 16,
         num_samples: int = 200,
-        dataset_source: str = "auto",
+        dataset_source: str = "cached",
         dataset_scale: str = "standard",
         gee_project_id: Optional[str] = None,
         chip_size: int = 256,
@@ -1864,6 +1864,87 @@ class StudioChipManager:
             "total_chips": total_chips,
             "cache_dir": self.cache_dir,
             "message": f"Extracted {extracted_count} chips into {self.cache_dir} (Total: {total_chips})",
+        }
+
+    def ingest_paired_chip(
+        self,
+        t1_bytes: bytes,
+        t2_bytes: bytes,
+        mask_bytes: Optional[bytes] = None,
+        chip_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Ingest user-supplied pre/post satellite imagery pair (Bring Your Own Data).
+        Supports GeoTIFF, TIFF, PNG, JPEG, and NPZ.
+        """
+        import io
+        import numpy as np
+        from datetime import datetime, timezone
+        from PIL import Image
+
+        def _decode_image_bytes(b: bytes) -> np.ndarray:
+            try:
+                import tifffile
+                arr = tifffile.imread(io.BytesIO(b))
+                if arr is not None and arr.size > 0:
+                    return arr
+            except Exception:
+                pass
+            img = Image.open(io.BytesIO(b))
+            return np.array(img)
+
+        os.makedirs(self.cache_dir, exist_ok=True)
+        t1_arr = _decode_image_bytes(t1_bytes).astype(np.float32)
+        t2_arr = _decode_image_bytes(t2_bytes).astype(np.float32)
+
+        if t1_arr.ndim == 2:
+            t1_arr = t1_arr[np.newaxis, ...]
+        elif t1_arr.ndim == 3 and t1_arr.shape[-1] in (1, 3, 4, 12, 13):
+            t1_arr = np.transpose(t1_arr, (2, 0, 1))
+
+        if t2_arr.ndim == 2:
+            t2_arr = t2_arr[np.newaxis, ...]
+        elif t2_arr.ndim == 3 and t2_arr.shape[-1] in (1, 3, 4, 12, 13):
+            t2_arr = np.transpose(t2_arr, (2, 0, 1))
+
+        h = min(t1_arr.shape[1], t2_arr.shape[1])
+        w = min(t1_arr.shape[2], t2_arr.shape[2])
+        t1_arr = t1_arr[:, :h, :w]
+        t2_arr = t2_arr[:, :h, :w]
+
+        if mask_bytes and len(mask_bytes) > 0:
+            mask_arr = _decode_image_bytes(mask_bytes)
+            if mask_arr.ndim == 3:
+                mask_arr = mask_arr[..., 0]
+            mask_arr = (mask_arr[:h, :w] > 0).astype(np.float32)
+        else:
+            mask_arr = np.zeros((h, w), dtype=np.float32)
+
+        sar_vv = np.zeros((h, w), dtype=np.float32)
+        sar_vh = np.zeros((h, w), dtype=np.float32)
+
+        cid = chip_name or f"byod_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+        clean_cid = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in cid)
+        out_path = os.path.join(self.cache_dir, f"{clean_cid}.npz")
+
+        np.savez_compressed(
+            out_path,
+            t1_optical=t1_arr,
+            t2_optical=t2_arr,
+            sar_vv=sar_vv,
+            sar_vh=sar_vh,
+            label=mask_arr,
+        )
+
+        total_chips = len(glob.glob(os.path.join(self.cache_dir, "*.npz")))
+        return {
+            "status": "success",
+            "chip_id": clean_cid,
+            "filename": f"{clean_cid}.npz",
+            "dimensions": f"{w}x{h}",
+            "channels": int(t1_arr.shape[0]),
+            "cache_dir": self.cache_dir,
+            "total_chips": total_chips,
+            "message": f"Successfully ingested BYOD satellite pair as {clean_cid}.npz ({w}x{h}, {t1_arr.shape[0]} bands)",
         }
 
     def fetch_gee_chips(

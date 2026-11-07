@@ -824,7 +824,28 @@ def test_dataset_loader_and_manual_inference_endpoints(tmp_path):
     assert resp_gee.status_code == 200
     assert resp_gee.json()["status"] == "success"
 
+def test_web_studio_byod_upload_pair_endpoint():
+    import io
+    from PIL import Image
 
+    img1 = Image.new("RGB", (64, 64), color=(34, 139, 34))
+    buf1 = io.BytesIO()
+    img1.save(buf1, format="PNG")
+    buf1.seek(0)
 
+    img2 = Image.new("RGB", (64, 64), color=(139, 69, 19))
+    buf2 = io.BytesIO()
+    img2.save(buf2, format="PNG")
+    buf2.seek(0)
 
+    files = {
+        "t1": ("scene_t1.png", buf1.getvalue(), "image/png"),
+        "t2": ("scene_t2.png", buf2.getvalue(), "image/png"),
+    }
+    resp = client.post("/studio/api/dataset/upload-pair", files=files, data={"chip_id": "test_byod_01"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "success"
+    assert data["chip_id"] == "test_byod_01"
+    assert data["dimensions"] == "64x64"
 
