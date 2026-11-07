@@ -374,7 +374,7 @@ class StudioTrainingManager:
         num_samples: int = 200,
         dataset_source: str = "auto",
         dataset_scale: str = "standard",
-        gee_project_id: Optional[str] = "indigo-shuttle-426915-a4",
+        gee_project_id: Optional[str] = None,
         chip_size: int = 256,
         use_data_augmentation: bool = True,
         enforce_class_balance: bool = True,
@@ -458,7 +458,7 @@ class StudioTrainingManager:
         num_samples: int = 200,
         dataset_source: str = "auto",
         dataset_scale: str = "standard",
-        gee_project_id: Optional[str] = "indigo-shuttle-426915-a4",
+        gee_project_id: Optional[str] = None,
         chip_size: int = 256,
         use_data_augmentation: bool = True,
         enforce_class_balance: bool = True,
@@ -494,13 +494,13 @@ class StudioTrainingManager:
                     dataset_source = "synthetic"
 
             if dataset_source == "gee":
-                self.log(f"🛰️ Earth Engine + Hansen GFC active: Scale={dataset_scale.upper()} ({effective_samples} chips, Project={gee_project_id or 'indigo-shuttle-426915-a4'})")
+                self.log(f"🛰️ Earth Engine + Hansen GFC active: Scale={dataset_scale.upper()} ({effective_samples} chips, Project={gee_project_id or os.getenv('GEE_PROJECT_ID', 'not configured')})")
                 chip_mgr = StudioChipManager(cache_dir=clean_cache_dir)
                 cached_files = glob.glob(os.path.join(clean_cache_dir, "*.npz"))
                 if len(cached_files) < effective_samples:
                     self.log(f"⚡ Ingesting {effective_samples} satellite chips with Hansen loss masks...")
                     chip_mgr.fetch_gee_chips(
-                        project_id=gee_project_id or "indigo-shuttle-426915-a4",
+                        project_id=gee_project_id or os.getenv("GEE_PROJECT_ID", "demo-gee-project"),
                         num_chips=effective_samples,
                         chip_size=chip_size,
                         target_pos_ratio=0.70 if enforce_class_balance else 0.50,
@@ -1868,7 +1868,7 @@ class StudioChipManager:
 
     def fetch_gee_chips(
         self,
-        project_id: Optional[str] = "indigo-shuttle-426915-a4",
+        project_id: Optional[str] = None,
         num_chips: int = 200,
         chip_size: int = 256,
         target_pos_ratio: float = 0.70,
