@@ -9,6 +9,7 @@
 [![Tests](https://img.shields.io/badge/Tests-105%20passed-10B981.svg)](tests/)
 [![Open Training In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/safiydev/geofm-deforestation/blob/main/notebooks/geofm_training.ipynb)
 [![Open Dataset Builder In Colab](https://img.shields.io/badge/Colab-Dataset%20Builder%20ZIP-F9AB00?logo=googlecolab&logoColor=white)](https://colab.research.google.com/github/safiydev/geofm-deforestation/blob/main/notebooks/geofm_dataset_builder.ipynb)
+[![YouTube Demo](https://img.shields.io/badge/YouTube-Watch%20Demo%20Video-FF0000?logo=youtube&logoColor=white)](https://youtu.be/PIMk2IiXU8I)
 
 **GeoFM** is a production-ready Geospatial AI platform engineered for **near-real-time tropical deforestation detection** and **European Union Deforestation Regulation (EUDR, Regulation (EU) 2023/1115)** compliance auditing.
 
