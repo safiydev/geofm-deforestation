@@ -76,3 +76,7 @@ Issues = "https://github.com/safiydev/geofm-deforestation/issues"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["geofm*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
