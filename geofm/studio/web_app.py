@@ -45,7 +45,7 @@ class TrainRequest(BaseModel):
     num_samples: int = Field(default=200)
     dataset_source: str = Field(default="gee")
     dataset_scale: str = Field(default="continental")
-    gee_project_id: Optional[str] = Field(default="indigo-shuttle-426915-a4")
+    gee_project_id: Optional[str] = Field(default=None)
     chip_size: int = Field(default=256)
     use_data_augmentation: bool = Field(default=True)
     enforce_class_balance: bool = Field(default=True)
@@ -86,7 +86,7 @@ class SetFolderRequest(BaseModel):
 
 
 class FetchGEERequest(BaseModel):
-    project_id: str = Field(default="indigo-shuttle-426915-a4")
+    project_id: str = Field(default="")
     num_chips: int = Field(default=200)
     chip_size: int = Field(default=256)
     target_pos_ratio: float = Field(default=0.70)
@@ -730,7 +730,7 @@ STUDIO_HTML = r"""<!DOCTYPE html>
             </div>
             <div class="form-group">
               <label>Google Earth Engine Project ID (GEE_PROJECT_ID)</label>
-              <input type="text" id="trainGeeProjectId" class="form-control" value="indigo-shuttle-426915-a4">
+              <input type="text" id="trainGeeProjectId" class="form-control" value="" placeholder="e.g. your-gee-project-id">
             </div>
 
             <!-- Group 2: Model Architecture & LoRA PEFT -->
@@ -1091,7 +1091,7 @@ STUDIO_HTML = r"""<!DOCTYPE html>
             <div class="form-group">
               <label>Manual Model File Path (.pt / .pth)</label>
               <div style="display:flex; gap:0.4rem;">
-                <input type="text" id="manualModelPath" class="form-control" placeholder="C:\\Users\\HP\\Downloads\\best_model.pt">
+                <input type="text" id="manualModelPath" class="form-control" placeholder="e.g. ./checkpoints/best_model.pt or /path/to/model.pt">
                 <input type="file" id="manualModelFileInput" accept=".pt,.pth" style="display:none;" onchange="handleManualModelFileChosen(this)">
                 <button class="btn btn-secondary" onclick="document.getElementById('manualModelFileInput').click()" title="Browse local disk">Browse</button>
               </div>
@@ -1230,7 +1230,7 @@ STUDIO_HTML = r"""<!DOCTYPE html>
           <div class="card-title">1. Earth Engine + Hansen GFC</div>
           <div class="form-group">
             <label>GEE Project ID (GEE_PROJECT_ID)</label>
-            <input type="text" id="loaderGeeProjectId" class="form-control" value="indigo-shuttle-426915-a4">
+            <input type="text" id="loaderGeeProjectId" class="form-control" value="" placeholder="e.g. your-gee-project-id">
           </div>
           <div class="form-group">
             <label>Target Chip Volume</label>
@@ -1260,7 +1260,7 @@ STUDIO_HTML = r"""<!DOCTYPE html>
           <div class="card-title">2. Local Folder Scanner</div>
           <div class="form-group">
             <label>Enter Chips Directory Path</label>
-            <input type="text" id="loaderLocalFolder" class="form-control" placeholder="e.g. C:\\Users\\HP\\satellite_chips or ./data/chips_cache" value="./data/chips_cache">
+            <input type="text" id="loaderLocalFolder" class="form-control" placeholder="e.g. ./data/chips_cache or /path/to/chips" value="./data/chips_cache">
           </div>
           <p style="font-size:0.72rem; color:var(--text-muted); margin-bottom:0.85rem; line-height:1.4;">
             Point the studio to any folder on your hard drive containing <code>.npz</code> multi-spectral chips or <code>manifest.jsonl</code>.
@@ -1688,7 +1688,7 @@ STUDIO_HTML = r"""<!DOCTYPE html>
       const payload = {
         dataset_source: document.getElementById('trainDatasetSource') ? document.getElementById('trainDatasetSource').value : 'gee',
         dataset_scale: document.getElementById('trainDatasetScale') ? document.getElementById('trainDatasetScale').value : 'continental',
-        gee_project_id: document.getElementById('trainGeeProjectId') ? document.getElementById('trainGeeProjectId').value : 'indigo-shuttle-426915-a4',
+        gee_project_id: document.getElementById('trainGeeProjectId') ? document.getElementById('trainGeeProjectId').value : '',
         chip_size: parseInt(document.getElementById('trainChipSize') ? document.getElementById('trainChipSize').value : 256),
         architecture: document.getElementById('trainArch').value,
         use_lora: document.getElementById('trainUseLora').checked,
@@ -2425,7 +2425,7 @@ STUDIO_HTML = r"""<!DOCTYPE html>
     // Tab 4: Dataset & Input Loader JavaScript
     // =========================================================================
     async function fetchChipsFromGEE() {
-      const projId = document.getElementById('loaderGeeProjectId') ? document.getElementById('loaderGeeProjectId').value.trim() : 'indigo-shuttle-426915-a4';
+      const projId = document.getElementById('loaderGeeProjectId') ? document.getElementById('loaderGeeProjectId').value.trim() : '';
       const vol = parseInt(document.getElementById('loaderGeeVolume') ? document.getElementById('loaderGeeVolume').value : 200);
       const chipSz = parseInt(document.getElementById('loaderGeeChipSize') ? document.getElementById('loaderGeeChipSize').value : 256);
       const statusBox = document.getElementById('loaderGeeStatus');

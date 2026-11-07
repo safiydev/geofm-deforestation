@@ -698,7 +698,7 @@ def test_web_studio_16_parameter_training_config(tmp_path):
         "architecture": "siamese",
         "dataset_source": "auto",
         "dataset_scale": "quick",
-        "gee_project_id": "indigo-shuttle-426915-a4",
+        "gee_project_id": "demo-gee-project",
         "chip_size": 64,
         "use_lora": True,
         "lora_rank": 8,
@@ -816,7 +816,7 @@ def test_dataset_loader_and_manual_inference_endpoints(tmp_path):
 
     # 6. Test GEE chip fetcher endpoint
     resp_gee = client.post("/studio/api/dataset/fetch-gee", json={
-        "project_id": "indigo-shuttle-426915-a4",
+        "project_id": "demo-gee-project",
         "num_chips": 4,
         "chip_size": 64,
         "target_pos_ratio": 0.70,
