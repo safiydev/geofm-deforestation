@@ -544,6 +544,14 @@ class StudioTrainingManager:
                     pass
                 self.log(f"✓ Spatial block split complete ({len(train_idx)} train, {len(val_idx)} val chips)")
 
+            # Cap training & validation splits to effective_samples if requested
+            if effective_samples and (len(train_idx) + len(val_idx) > effective_samples):
+                max_train = max(2, int(effective_samples * 0.75))
+                max_val = max(1, effective_samples - max_train)
+                train_idx = train_idx[:max_train]
+                val_idx = val_idx[:max_val]
+                self.log(f"⚡ Capped active dataset to {len(train_idx)} train, {len(val_idx)} val chips for fast execution")
+
             train_sub = torch.utils.data.Subset(dataset, train_idx)
             val_sub = torch.utils.data.Subset(dataset, val_idx)
 
